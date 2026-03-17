@@ -7,6 +7,76 @@
   --glass: rgba(255,255,255,0.07);
   --glass-border: rgba(255,255,255,0.1);
   --text-dim: rgba(255,255,255,0.45);
+  --bg: #090909;
+  --lyric-active-color: white;
+  --glow-mult: 1;
+}
+
+/* ── Neon theme ── */
+[data-theme="neon"] {
+  --bg: #05050f;
+  --lyric-active-color: var(--accent);
+  --glow-mult: 2.5;
+  --glass: rgba(255,255,255,0.05);
+}
+[data-theme="neon"] .bg-art {
+  filter: blur(80px) saturate(3) brightness(0.3) hue-rotate(10deg);
+}
+[data-theme="neon"] .ll.active {
+  text-shadow:
+    0 0 20px var(--accent),
+    0 0 60px var(--accent),
+    0 0 120px var(--accent);
+}
+[data-theme="neon"] .prog-fill {
+  box-shadow: 0 0 16px var(--accent), 0 0 32px var(--accent);
+}
+
+/* ── Glass theme ── */
+[data-theme="glass"] {
+  --bg: #101828;
+  --glass: rgba(255,255,255,0.12);
+  --glass-border: rgba(255,255,255,0.2);
+}
+[data-theme="glass"] .bg-art {
+  filter: blur(60px) saturate(1.5) brightness(0.5);
+}
+[data-theme="glass"] .topbar {
+  background: rgba(255,255,255,0.08);
+  backdrop-filter: blur(20px);
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+  border-radius: 0 0 20px 20px;
+  margin: 0 12px;
+}
+[data-theme="glass"] .prog-bar {
+  background: rgba(255,255,255,0.15);
+  height: 4px;
+}
+
+/* ── Ambient glow orbs ── */
+.ambient-orb {
+  position: absolute; border-radius: 50%; z-index: 0;
+  filter: blur(80px); pointer-events: none;
+  animation: orb-drift 12s ease-in-out infinite alternate;
+}
+.ambient-orb:nth-child(1) {
+  width: 50vw; height: 50vw;
+  top: -10%; left: -10%;
+  background: radial-gradient(circle, var(--accent), transparent 70%);
+  opacity: 0.12;
+  animation-duration: 14s;
+}
+.ambient-orb:nth-child(2) {
+  width: 40vw; height: 40vw;
+  bottom: -5%; right: -10%;
+  background: radial-gradient(circle, var(--accent), transparent 70%);
+  opacity: 0.09;
+  animation-duration: 10s;
+  animation-delay: -4s;
+}
+@keyframes orb-drift {
+  from { transform: translate(0, 0) scale(1); }
+  to   { transform: translate(5%, 8%) scale(1.15); }
 }
 
 html, body, #root {
@@ -145,6 +215,13 @@ html, body, #root {
 .bars.active span:nth-child(3) { animation: bar 0.8s ease-in-out 0.3s infinite; }
 .bars.active span:nth-child(4) { animation: bar 0.8s ease-in-out 0.45s infinite; }
 
+.theme-btn {
+  background: none; border: none; color: rgba(255,255,255,0.4);
+  font-size: 16px; cursor: pointer; padding: 6px 8px; flex-shrink: 0;
+  font-family: inherit; transition: color 0.2s, transform 0.2s; border-radius: 6px;
+}
+.theme-btn:hover { color: var(--accent); transform: rotate(30deg); }
+
 .x-btn {
   background: none; border: none; color: rgba(255,255,255,0.3);
   font-size: 14px; cursor: pointer; padding: 6px 10px; flex-shrink: 0;
@@ -173,11 +250,16 @@ html, body, #root {
   user-select: none; max-width: 640px; width: 100%;
   padding: 3px 12px; line-height: 1.45;
 }
+@keyframes lyric-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
 .ll.active {
   font-size: clamp(26px, 5vw, 38px);
-  color: white;
+  color: var(--lyric-active-color, white);
   text-shadow: 0 0 50px var(--accent), 0 0 100px var(--accent);
   padding: 6px 12px;
+  animation: lyric-in 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94) both;
 }
 .ll.d1 { font-size: clamp(17px, 2.5vw, 21px); color: rgba(255,255,255,0.55); }
 .ll.d2 { font-size: clamp(14px, 2vw, 17px);   color: rgba(255,255,255,0.35); }

@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { getCurrentlyPlaying } from '../spotify'
 import { parseLRC, getCurrentLineIndex } from '../lrc'
 
+const THEMES = ['dark', 'neon', 'glass']
+
 async function extractAccentColor(url) {
   try {
     const img = new Image()
@@ -51,8 +53,43 @@ export default function Player({ onLogout }) {
   const [status, setStatus] = useState('no-track')
   const [accentColor, setAccentColor] = useState('#1DB954')
   const [focusMode, setFocusMode] = useState(false)
+  const [themeIndex, setThemeIndex] = useState(() => {
+    const saved = localStorage.getItem('lf_theme')
+    return saved ? (THEMES.indexOf(saved) || 0) : 0
+  })
   const lineRefs = useRef([])
   const currentTrackIdRef = useRef(null)
+  const touchStartX = useRef(null)
+
+  const theme = THEMES[themeIndex]
+
+  const cycleTheme = useCallback((e) => {
+    e.stopPropagation()
+    setThemeIndex(i => {
+      const next = (i + 1) % THEMES.length
+      localStorage.setItem('lf_theme', THEMES[next])
+      return next
+    })
+  }, [])
+
+  const handleTouchStart = useCallback((e) => {
+    touchStartX.current = e.touches[0].clientX
+  }, [])
+
+  const handleTouchEnd = useCallback((e) => {
+    if (touchStartX.current === null) return
+    const dx = e.changedTouches[0].clientX - touchStartX.current
+    touchStartX.current = null
+    if (Math.abs(dx) > 60) {
+      setThemeIndex(i => {
+        const next = dx < 0
+          ? (i + 1) % THEMES.length
+          : (i - 1 + THEMES.length) % THEMES.length
+        localStorage.setItem('lf_theme', THEMES[next])
+        return next
+      })
+    }
+  }, [])
 
   const fetchLyrics = useCallback(async (name, artist, album, dur) => {
     try {
@@ -148,10 +185,15 @@ export default function Player({ onLogout }) {
   return (
     <div
       className={`player${focusMode ? ' focus' : ''}`}
+      data-theme={theme}
       style={{ '--accent': accentColor }}
       onClick={() => setFocusMode(v => !v)}
+      onTouchStart={handleTouchStart}
+      onTouchEnd={handleTouchEnd}
     >
       {albumArt && <div className="bg-art" style={{ backgroundImage: `url(${albumArt})` }} />}
+      <div className="ambient-orb" />
+      <div className="ambient-orb" />
       <div className="bg-vignette" />
 
       <div className="topbar" onClick={e => e.stopPropagation()}>
@@ -168,6 +210,9 @@ export default function Player({ onLogout }) {
         <div className={`bars${isPlaying ? ' active' : ''}`}>
           <span /><span /><span /><span />
         </div>
+        <button className="theme-btn" onClick={cycleTheme} title="Change theme">
+          {theme === 'dark' ? '◐' : theme === 'neon' ? '✦' : '◈'}
+        </button>
         <button className="x-btn" onClick={onLogout} title="Logout">✕</button>
       </div>
 
