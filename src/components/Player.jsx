@@ -1,8 +1,26 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { getCurrentlyPlaying } from '../spotify'
 import { parseLRC, getCurrentLineIndex } from '../lrc'
 
 const THEMES = ['dark', 'neon', 'glass', 'minimal']
+
+const LANGUAGES = [
+  { code: 'en', name: 'English' },
+  { code: 'es', name: 'Spanish' },
+  { code: 'fr', name: 'French' },
+  { code: 'de', name: 'German' },
+  { code: 'it', name: 'Italian' },
+  { code: 'pt', name: 'Portuguese' },
+  { code: 'ja', name: 'Japanese' },
+  { code: 'ko', name: 'Korean' },
+  { code: 'zh', name: 'Chinese' },
+  { code: 'ar', name: 'Arabic' },
+  { code: 'hi', name: 'Hindi' },
+  { code: 'ru', name: 'Russian' },
+  { code: 'tr', name: 'Turkish' },
+  { code: 'nl', name: 'Dutch' },
+  { code: 'sv', name: 'Swedish' },
+]
 
 async function extractAccentColor(url) {
   try {
@@ -27,17 +45,21 @@ async function extractAccentColor(url) {
   } catch { return 'rgb(250, 60, 80)' }
 }
 
-// Lyric line class with smoother distance grading
-function lineClass(i, current) {
-  if (current < 0) return 'll upcoming d5'
+function lineClass(i, current, isPro) {
+  if (current < 0) return `ll upcoming d5${isPro ? ' pro-blur' : ''}`
   if (i === current) return 'll active'
   const d = Math.abs(i - current)
   const dist = Math.min(d, 6)
-  return `ll ${i < current ? 'past' : 'upcoming'} d${dist}`
+  const base = `ll ${i < current ? 'past' : 'upcoming'} d${dist}`
+  return isPro ? `${base} pro-blur` : base
 }
 
-// Cache for lyrics to avoid re-fetching
 const lyricsCache = new Map()
+const translationCache = new Map()
+
+function getPro() {
+  return localStorage.getItem('lf_pro') === 'true'
+}
 
 export default function Player({ onLogout }) {
   const [track, setTrack] = useState(null)
@@ -50,6 +72,12 @@ export default function Player({ onLogout }) {
   const [accentColor, setAccentColor] = useState('rgb(250, 60, 80)')
   const [focusMode, setFocusMode] = useState(false)
   const [showPremium, setShowPremium] = useState(false)
+  const [isPro, setIsPro] = useState(getPro)
+  const [showTranslate, setShowTranslate] = useState(false)
+  const [translatedLyrics, setTranslatedLyrics] = useState(null)
+  const [translatingLang, setTranslatingLang] = useState(null)
+  const [showExport, setShowExport] = useState(false)
+  const [exportStatus, setExportStatus] = useState(null)
   const [themeIndex, setThemeIndex] = useState(() => {
     const saved = localStorage.getItem('lf_theme')
     return saved ? (THEMES.indexOf(saved) === -1 ? 0 : THEMES.indexOf(saved)) : 0
@@ -62,6 +90,12 @@ export default function Player({ onLogout }) {
   const lastUpdateRef = useRef(Date.now())
 
   const theme = THEMES[themeIndex]
+
+  const activatePro = useCallback(() => {
+    localStorage.setItem('lf_pro', 'true')
+    setIsPro(true)
+    setShowPremium(false)
+  }, [])
 
   const cycleTheme = useCallback((e) => {
     e.stopPropagation()
@@ -89,6 +123,200 @@ export default function Player({ onLogout }) {
     }
   }, [])
 
+  // Translation using MyMemory free API
+  const translateLyrics = useCallback(async (lang) => {
+    if (!lyrics.length) return
+    setTranslatingLang(lang)
+
+    const cacheKey = `${track?.id}|${lang}`
+    if (translationCache.has(cacheKey)) {
+      setTranslatedLyrics(translationCache.get(cacheKey))
+      setTranslatingLang(null)
+      setShowTranslate(false)
+      return
+    }
+
+    try {
+      // Batch lyrics text for translation (join with | separator)
+      const textsToTranslate = lyrics.filter(l => l.text.trim()).map(l => l.text)
+      const translated = []
+
+      // Translate in batches of 5 for speed
+      for (let i = 0; i < textsToTranslate.length; i += 5) {
+        const batch = textsToTranslate.slice(i, i + 5)
+        const results = await Promise.all(
+          batch.map(async (text) => {
+            try {
+              const res = await fetch(
+                `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=en|${lang}`
+              )
+              const data = await res.json()
+              return data.responseData?.translatedText || text
+            } catch { return text }
+          })
+        )
+        translated.push(...results)
+      }
+
+      // Map translations back to lyrics array with timing
+      let tIdx = 0
+      const result = lyrics.map(l => {
+        if (l.text.trim() && tIdx < translated.length) {
+          return { ...l, translation: translated[tIdx++] }
+        }
+        return { ...l, translation: '' }
+      })
+
+      translationCache.set(cacheKey, result)
+      setTranslatedLyrics(result)
+    } catch {
+      setTranslatedLyrics(null)
+    }
+    setTranslatingLang(null)
+    setShowTranslate(false)
+  }, [lyrics, track])
+
+  const clearTranslation = useCallback(() => {
+    setTranslatedLyrics(null)
+  }, [])
+
+  // Export lyric card as image
+  const exportLyricCard = useCallback(async () => {
+    if (!track || currentLine < 0 || !lyrics[currentLine]) return
+    setExportStatus('generating')
+
+    try {
+      const canvas = document.createElement('canvas')
+      canvas.width = 1080
+      canvas.height = 1920
+      const ctx = canvas.getContext('2d')
+
+      // Background
+      if (track.album?.images?.[0]?.url) {
+        try {
+          const bgImg = new Image()
+          bgImg.crossOrigin = 'anonymous'
+          await new Promise((res, rej) => { bgImg.onload = res; bgImg.onerror = rej; bgImg.src = track.album.images[0].url })
+          ctx.drawImage(bgImg, 0, 0, 1080, 1920)
+          ctx.fillStyle = 'rgba(0,0,0,0.65)'
+          ctx.fillRect(0, 0, 1080, 1920)
+          // Apply blur via re-draw
+          ctx.filter = 'blur(60px) brightness(0.4)'
+          ctx.drawImage(bgImg, -100, -100, 1280, 2120)
+          ctx.filter = 'none'
+          // Dark overlay
+          ctx.fillStyle = 'rgba(0,0,0,0.4)'
+          ctx.fillRect(0, 0, 1080, 1920)
+        } catch {
+          ctx.fillStyle = '#0a0a0a'
+          ctx.fillRect(0, 0, 1080, 1920)
+        }
+      } else {
+        ctx.fillStyle = '#0a0a0a'
+        ctx.fillRect(0, 0, 1080, 1920)
+      }
+
+      // Album art centered
+      if (track.album?.images?.[0]?.url) {
+        try {
+          const artImg = new Image()
+          artImg.crossOrigin = 'anonymous'
+          await new Promise((res, rej) => { artImg.onload = res; artImg.onerror = rej; artImg.src = track.album.images[0].url })
+          const artSize = 320
+          const artX = (1080 - artSize) / 2
+          const artY = 400
+          // Rounded corners
+          const r = 24
+          ctx.save()
+          ctx.beginPath()
+          ctx.roundRect(artX, artY, artSize, artSize, r)
+          ctx.clip()
+          ctx.drawImage(artImg, artX, artY, artSize, artSize)
+          ctx.restore()
+          // Shadow
+          ctx.shadowColor = 'rgba(0,0,0,0.5)'
+          ctx.shadowBlur = 40
+        } catch {}
+      }
+
+      ctx.shadowBlur = 0
+
+      // Song title
+      ctx.textAlign = 'center'
+      ctx.fillStyle = 'white'
+      ctx.font = 'bold 42px -apple-system, SF Pro Display, sans-serif'
+      ctx.fillText(track.name, 540, 820, 900)
+
+      // Artist
+      ctx.fillStyle = 'rgba(255,255,255,0.6)'
+      ctx.font = '32px -apple-system, SF Pro Display, sans-serif'
+      ctx.fillText(track.artists?.map(a => a.name).join(', ') || '', 540, 870, 900)
+
+      // Lyric text - wrap lines
+      const lyricText = lyrics[currentLine].text
+      ctx.fillStyle = 'white'
+      ctx.font = 'bold 56px -apple-system, SF Pro Display, sans-serif'
+      const words = lyricText.split(' ')
+      const lines = []
+      let line = ''
+      for (const word of words) {
+        const test = line ? `${line} ${word}` : word
+        if (ctx.measureText(test).width > 860) {
+          lines.push(line)
+          line = word
+        } else { line = test }
+      }
+      if (line) lines.push(line)
+
+      const lineHeight = 72
+      const startY = 1050 + ((4 - lines.length) * lineHeight / 2)
+      lines.forEach((l, i) => {
+        ctx.fillText(l, 540, startY + i * lineHeight, 960)
+      })
+
+      // Surrounding lyrics (dimmed)
+      ctx.font = '28px -apple-system, SF Pro Display, sans-serif'
+      if (currentLine > 0 && lyrics[currentLine - 1]?.text) {
+        ctx.fillStyle = 'rgba(255,255,255,0.25)'
+        ctx.fillText(lyrics[currentLine - 1].text, 540, startY - 60, 900)
+      }
+      const afterY = startY + lines.length * lineHeight + 30
+      if (currentLine < lyrics.length - 1 && lyrics[currentLine + 1]?.text) {
+        ctx.fillStyle = 'rgba(255,255,255,0.25)'
+        ctx.fillText(lyrics[currentLine + 1].text, 540, afterY, 900)
+      }
+
+      // LyricFlow watermark
+      ctx.fillStyle = 'rgba(255,255,255,0.3)'
+      ctx.font = 'bold 24px -apple-system, SF Pro Display, sans-serif'
+      ctx.fillText('LyricFlow', 540, 1780)
+
+      // Download
+      const link = document.createElement('a')
+      link.download = `${track.name} - LyricFlow.png`
+      link.href = canvas.toDataURL('image/png')
+      link.click()
+      setExportStatus('done')
+      setTimeout(() => setExportStatus(null), 2000)
+    } catch {
+      setExportStatus('error')
+      setTimeout(() => setExportStatus(null), 2000)
+    }
+  }, [track, currentLine, lyrics])
+
+  // Share lyric card
+  const shareLyricCard = useCallback(async () => {
+    if (!track || currentLine < 0 || !lyrics[currentLine]) return
+    const text = `"${lyrics[currentLine].text}"\n— ${track.name} by ${track.artists?.map(a => a.name).join(', ')}\n\nvia LyricFlow`
+    if (navigator.share) {
+      try { await navigator.share({ text }) } catch {}
+    } else {
+      await navigator.clipboard.writeText(text)
+      setExportStatus('copied')
+      setTimeout(() => setExportStatus(null), 2000)
+    }
+  }, [track, currentLine, lyrics])
+
   const fetchLyrics = useCallback(async (name, artist, album, dur) => {
     const cacheKey = `${name}|${artist}`
     if (lyricsCache.has(cacheKey)) return lyricsCache.get(cacheKey)
@@ -111,7 +339,6 @@ export default function Player({ onLogout }) {
       if (lines.length) lyricsCache.set(cacheKey, lines)
       return lines
     } catch {
-      // Fallback: try search endpoint for better matching
       try {
         const params = new URLSearchParams({ q: `${name} ${artist}` })
         const res = await fetch(`https://lrclib.net/api/search?${params}`)
@@ -150,6 +377,7 @@ export default function Player({ onLogout }) {
         lineRefs.current = []
         setStatus('loading')
         setLyrics([])
+        setTranslatedLyrics(null)
 
         const art = data.item.album?.images?.[0]?.url
         if (art) extractAccentColor(art).then(setAccentColor)
@@ -166,14 +394,12 @@ export default function Player({ onLogout }) {
     } catch (e) { console.error(e) }
   }, [fetchLyrics])
 
-  // Faster polling: 3s instead of 5s
   useEffect(() => {
     fetchCurrentTrack()
     const id = setInterval(fetchCurrentTrack, 3000)
     return () => clearInterval(id)
   }, [fetchCurrentTrack])
 
-  // Use requestAnimationFrame for buttery smooth progress updates
   useEffect(() => {
     if (!isPlaying) {
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
@@ -191,14 +417,12 @@ export default function Player({ onLogout }) {
     return () => { if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current) }
   }, [isPlaying])
 
-  // Update current line
   useEffect(() => {
     if (!lyrics.length) return
     const idx = getCurrentLineIndex(lyrics, progressMs)
     if (idx !== currentLine) setCurrentLine(idx)
   }, [progressMs, lyrics, currentLine])
 
-  // Smooth scroll to active line
   useEffect(() => {
     if (currentLine >= 0 && lineRefs.current[currentLine]) {
       lineRefs.current[currentLine].scrollIntoView({ behavior: 'smooth', block: 'center' })
@@ -213,9 +437,11 @@ export default function Player({ onLogout }) {
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
   }
 
+  const displayLyrics = translatedLyrics || lyrics
+
   return (
     <div
-      className={`player${focusMode ? ' focus' : ''}`}
+      className={`player${focusMode ? ' focus' : ''}${isPro ? ' pro-mode' : ''}`}
       data-theme={theme}
       style={{ '--accent': accentColor }}
       onClick={() => setFocusMode(v => !v)}
@@ -244,17 +470,106 @@ export default function Player({ onLogout }) {
           <div className={`bars${isPlaying ? ' active' : ''}`}>
             <span /><span /><span /><span />
           </div>
+
+          {/* Translate button (Pro) */}
+          {isPro && (
+            <button
+              className={`icon-btn${translatedLyrics ? ' active-feature' : ''}`}
+              onClick={(e) => {
+                e.stopPropagation()
+                if (translatedLyrics) { clearTranslation() }
+                else { setShowTranslate(v => !v) }
+              }}
+              title={translatedLyrics ? 'Clear translation' : 'Translate lyrics'}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+              </svg>
+            </button>
+          )}
+
+          {/* Export button (Pro) */}
+          {isPro && (
+            <button
+              className="icon-btn"
+              onClick={(e) => { e.stopPropagation(); setShowExport(v => !v) }}
+              title="Export lyric card"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+              </svg>
+            </button>
+          )}
+
           <button className="icon-btn" onClick={cycleTheme} title="Change theme">
             {theme === 'dark' ? '◐' : theme === 'neon' ? '✦' : theme === 'glass' ? '◈' : '○'}
           </button>
-          <button className="icon-btn pro-btn" onClick={(e) => { e.stopPropagation(); setShowPremium(true) }} title="Pro Features">
-            PRO
+          <button
+            className={`icon-btn pro-btn${isPro ? ' pro-active' : ''}`}
+            onClick={(e) => { e.stopPropagation(); isPro ? setIsPro(false) || localStorage.removeItem('lf_pro') : setShowPremium(true) }}
+            title={isPro ? 'Pro Active' : 'Upgrade to Pro'}
+          >
+            {isPro ? '★' : 'PRO'}
           </button>
           <button className="icon-btn" onClick={onLogout} title="Logout">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
           </button>
         </div>
       </div>
+
+      {/* Translation language picker dropdown */}
+      {showTranslate && (
+        <div className="translate-dropdown" onClick={e => e.stopPropagation()}>
+          <div className="translate-header">
+            <span>Translate to</span>
+            <button className="translate-close" onClick={() => setShowTranslate(false)}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+          <div className="translate-list">
+            {LANGUAGES.map(lang => (
+              <button
+                key={lang.code}
+                className={`translate-lang${translatingLang === lang.code ? ' loading' : ''}`}
+                onClick={() => translateLyrics(lang.code)}
+                disabled={!!translatingLang}
+              >
+                {lang.name}
+                {translatingLang === lang.code && <div className="spinner-small" />}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Export dropdown */}
+      {showExport && (
+        <div className="export-dropdown" onClick={e => e.stopPropagation()}>
+          <button className="export-option" onClick={() => { exportLyricCard(); setShowExport(false) }}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/>
+            </svg>
+            Download Lyric Card
+          </button>
+          <button className="export-option" onClick={() => { shareLyricCard(); setShowExport(false) }}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+              <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+            </svg>
+            Share Lyric Text
+          </button>
+        </div>
+      )}
+
+      {/* Export status toast */}
+      {exportStatus && (
+        <div className="toast">
+          {exportStatus === 'generating' && 'Generating card...'}
+          {exportStatus === 'done' && 'Lyric card downloaded!'}
+          {exportStatus === 'copied' && 'Copied to clipboard!'}
+          {exportStatus === 'error' && 'Export failed, try again'}
+        </div>
+      )}
 
       <div className="lyrics-stage" onClick={e => e.stopPropagation()}>
         {status === 'loading' && (
@@ -288,13 +603,16 @@ export default function Player({ onLogout }) {
         )}
         {status === 'playing' && (
           <div className="lyrics-list">
-            {lyrics.map((line, i) => (
+            {displayLyrics.map((line, i) => (
               <div
                 key={`${track?.id}-${i}`}
                 ref={el => { lineRefs.current[i] = el }}
-                className={lineClass(i, currentLine)}
+                className={lineClass(i, currentLine, isPro)}
               >
-                {line.text || <span className="dot">·</span>}
+                <span className="lyric-text">{line.text || <span className="dot">·</span>}</span>
+                {line.translation && (
+                  <span className="lyric-translation">{line.translation}</span>
+                )}
               </div>
             ))}
           </div>
@@ -320,42 +638,78 @@ export default function Player({ onLogout }) {
             </button>
             <div className="premium-badge">PRO</div>
             <h2>Unlock LyricFlow Pro</h2>
-            <p className="premium-subtitle">Take your lyrics experience to the next level</p>
-            <ul className="premium-features">
-              <li>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2.5" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
-                Instant lyrics translation (40+ languages)
-              </li>
-              <li>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2.5" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
-                Export lyric cards for social media
-              </li>
-              <li>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2.5" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
-                Custom themes and advanced animations
-              </li>
-              <li>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2.5" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
-                Offline lyric caching
-              </li>
-              <li>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2.5" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
-                No watermarks on exports
-              </li>
-            </ul>
-            <div className="premium-pricing">
-              <div className="premium-price">
-                <span className="price-amount">$4.99</span>
-                <span className="price-period">/month</span>
+            <p className="premium-subtitle">The ultimate lyrics experience</p>
+
+            <div className="premium-feature-showcase">
+              <div className="showcase-item">
+                <div className="showcase-icon">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                    <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
+                  </svg>
+                </div>
+                <div>
+                  <strong>Cinematic Blur Mode</strong>
+                  <p>Only the current lyric is crystal clear — the rest beautifully fades into a cinematic blur</p>
+                </div>
               </div>
-              <span className="price-or">or</span>
-              <div className="premium-price lifetime">
-                <span className="price-amount">$29.99</span>
-                <span className="price-period">lifetime</span>
+              <div className="showcase-item">
+                <div className="showcase-icon">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                    <circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                  </svg>
+                </div>
+                <div>
+                  <strong>Live Translation</strong>
+                  <p>Translate lyrics in real-time to 15+ languages as you listen</p>
+                </div>
+              </div>
+              <div className="showcase-item">
+                <div className="showcase-icon">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                    <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/>
+                  </svg>
+                </div>
+                <div>
+                  <strong>Lyric Card Export</strong>
+                  <p>Create stunning lyric cards with album art for Instagram and TikTok</p>
+                </div>
+              </div>
+              <div className="showcase-item">
+                <div className="showcase-icon">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                    <path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/>
+                    <path d="m9 12 2 2 4-4"/>
+                  </svg>
+                </div>
+                <div>
+                  <strong>All Themes Unlocked</strong>
+                  <p>Access every theme including exclusive Pro-only visual modes</p>
+                </div>
               </div>
             </div>
-            <button className="btn-primary premium-cta">Start 7-Day Free Trial</button>
-            <p className="premium-note">Cancel anytime. No commitment.</p>
+
+            <div className="premium-pricing">
+              <div className="premium-price-card active">
+                <span className="price-tag">Monthly</span>
+                <div className="premium-price">
+                  <span className="price-amount">$4.99</span>
+                  <span className="price-period">/mo</span>
+                </div>
+              </div>
+              <div className="premium-price-card">
+                <span className="price-tag">Lifetime</span>
+                <div className="premium-price">
+                  <span className="price-amount">$29.99</span>
+                  <span className="price-period">once</span>
+                </div>
+                <span className="price-save">Save 75%</span>
+              </div>
+            </div>
+
+            <button className="btn-primary premium-cta" onClick={activatePro}>
+              Activate Pro — Free Trial
+            </button>
+            <p className="premium-note">7 days free, cancel anytime</p>
           </div>
         </div>
       )}

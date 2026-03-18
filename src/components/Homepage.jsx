@@ -13,11 +13,21 @@ const FEATURES = [
   {
     icon: (
       <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+      </svg>
+    ),
+    title: 'Cinematic Blur',
+    desc: 'Pro mode: only the active lyric is sharp — everything else beautifully blurs away like a film.',
+    premium: true,
+  },
+  {
+    icon: (
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
         <circle cx="12" cy="12" r="10" /><path d="M2 12h20" /><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
       </svg>
     ),
-    title: 'Translations',
-    desc: 'Instantly translate lyrics to 40+ languages while you listen.',
+    title: 'Live Translation',
+    desc: 'Translate lyrics in real-time to 15+ languages while you listen.',
     premium: true,
   },
   {
@@ -27,7 +37,7 @@ const FEATURES = [
       </svg>
     ),
     title: 'Lyric Cards',
-    desc: 'Export beautiful lyric cards for Instagram, TikTok and more.',
+    desc: 'Export stunning lyric cards with album art for Instagram and TikTok.',
     premium: true,
   },
   {
@@ -37,7 +47,7 @@ const FEATURES = [
       </svg>
     ),
     title: 'Themes & Vibes',
-    desc: 'Dark, neon, glass and more. Dynamic colors from album art.',
+    desc: 'Dark, neon, glass, minimal and more. Dynamic colors from album art.',
   },
 ]
 
@@ -121,12 +131,13 @@ export default function Homepage() {
 
           <div className="hero-preview">
             <div className="preview-mockup">
-              <div className="mockup-line mockup-dim">And I know when that hotline bling</div>
-              <div className="mockup-line mockup-dim-2">That can only mean one thing</div>
+              <div className="mockup-line mockup-blur-heavy">And I know when that hotline bling</div>
+              <div className="mockup-line mockup-blur-light">That can only mean one thing</div>
               <div className="mockup-line mockup-active">I know when that hotline bling</div>
-              <div className="mockup-line mockup-dim-2">That can only mean one thing</div>
-              <div className="mockup-line mockup-dim">Ever since I left the city you</div>
+              <div className="mockup-line mockup-blur-light">That can only mean one thing</div>
+              <div className="mockup-line mockup-blur-heavy">Ever since I left the city you</div>
             </div>
+            <p className="preview-caption">Pro Cinematic Blur Mode</p>
           </div>
         </div>
       </section>
