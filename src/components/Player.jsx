@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { getCurrentlyPlaying, seekToPosition, pausePlayback, resumePlayback, skipToNext, skipToPrevious } from '../spotify'
 import { parseLRC, getCurrentLineIndex } from '../lrc'
+import Visualizer, { VISUALIZER_STYLES } from './Visualizer'
+import Insights, { trackSongPlay } from './Insights'
+import LyricMeaning from './LyricMeaning'
 
 const THEMES = ['dark', 'neon', 'glass', 'minimal']
 const VIEW_MODES = ['flow', 'karaoke', 'immersive']
@@ -33,6 +36,34 @@ const DEFAULT_PRO_SETTINGS = {
   fontSize: 100,
   blurEnabled: true,
   lyricAlign: 'center',
+  glowIntensity: 100,
+  animationSpeed: 100,
+  autoFocus: true,
+  privateMode: false,
+}
+
+const MOOD_KEYWORDS = {
+  energetic: ['dance', 'move', 'party', 'fire', 'jump', 'run', 'fast', 'wild', 'energy'],
+  sad: ['cry', 'tears', 'alone', 'heart', 'miss', 'gone', 'pain', 'broken', 'lost', 'die'],
+  chill: ['dream', 'night', 'float', 'peace', 'sky', 'calm', 'breeze', 'slow', 'easy'],
+  romantic: ['love', 'kiss', 'baby', 'darling', 'hold', 'touch', 'forever', 'yours'],
+  hype: ['yeah', "let's go", 'woah', 'drop', 'yo', 'bang', 'boom', 'turn up', 'lit'],
+}
+
+const MOOD_COLORS = {
+  energetic: 'rgb(255, 140, 50)',
+  sad: 'rgb(80, 140, 255)',
+  chill: 'rgb(160, 100, 240)',
+  romantic: 'rgb(255, 100, 160)',
+  hype: 'rgb(255, 60, 60)',
+}
+
+const MOOD_EMOJIS = {
+  energetic: '\u{1F525}',
+  sad: '\u{1F4A7}',
+  chill: '\u{1F30C}',
+  romantic: '\u{1F497}',
+  hype: '\u{26A1}',
 }
 
 function getProSettings() {
@@ -65,6 +96,37 @@ async function extractAccentColor(url) {
   } catch { return 'rgb(250, 60, 80)' }
 }
 
+function detectMood(lyrics) {
+  if (!lyrics || !lyrics.length) return null
+  const allText = lyrics.map(l => l.text).join(' ').toLowerCase()
+  let bestMood = null, bestCount = 0
+  for (const [mood, keywords] of Object.entries(MOOD_KEYWORDS)) {
+    let count = 0
+    for (const kw of keywords) {
+      const regex = new RegExp('\\b' + kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'gi')
+      const matches = allText.match(regex)
+      if (matches) count += matches.length
+    }
+    if (count > bestCount) { bestCount = count; bestMood = mood }
+  }
+  return bestCount >= 2 ? bestMood : null
+}
+
+function findInstrumentalGaps(lyrics) {
+  const gaps = new Set()
+  for (let i = 0; i < lyrics.length - 1; i++) {
+    const gapMs = (lyrics[i + 1].time - lyrics[i].time) * 1000
+    if (gapMs >= 8000 && !lyrics[i].text.trim()) {
+      gaps.add(i)
+    }
+    // Also mark lines where the next line is 8+ seconds away
+    if (gapMs >= 8000) {
+      gaps.add(i)
+    }
+  }
+  return gaps
+}
+
 function lineClass(i, current, isPro, blurEnabled) {
   if (current < 0) return `ll upcoming d5${isPro && blurEnabled ? ' pro-blur' : ''}`
   if (i === current) return 'll active'
@@ -76,6 +138,22 @@ function lineClass(i, current, isPro, blurEnabled) {
 
 const lyricsCache = new Map()
 const translationCache = new Map()
+
+// Persist lyrics cache to localStorage
+function persistLyricsCache() {
+  try {
+    const obj = {}
+    lyricsCache.forEach((v, k) => { obj[k] = v })
+    localStorage.setItem('lf_lyrics_cache', JSON.stringify(obj))
+  } catch {}
+}
+function loadLyricsCache() {
+  try {
+    const obj = JSON.parse(localStorage.getItem('lf_lyrics_cache'))
+    if (obj) Object.entries(obj).forEach(([k, v]) => lyricsCache.set(k, v))
+  } catch {}
+}
+loadLyricsCache()
 
 function getPro() { return localStorage.getItem('lf_pro') === 'true' }
 
@@ -106,6 +184,19 @@ export default function Player({ onLogout }) {
     const saved = localStorage.getItem('lf_theme')
     return saved ? (THEMES.indexOf(saved) === -1 ? 0 : THEMES.indexOf(saved)) : 0
   })
+
+  // New PRO feature states
+  const [visualizerStyle, setVisualizerStyle] = useState(0)
+  const [visualizerEnabled, setVisualizerEnabled] = useState(false)
+  const [loopActive, setLoopActive] = useState(false)
+  const [loopStart, setLoopStart] = useState(null)
+  const [loopEnd, setLoopEnd] = useState(null)
+  const [mood, setMood] = useState(null)
+  const [showInsights, setShowInsights] = useState(false)
+  const [isOnline, setIsOnline] = useState(navigator.onLine)
+  const [meaningLine, setMeaningLine] = useState(null)
+  const [premiumTab, setPremiumTab] = useState('features')
+
   const lineRefs = useRef([])
   const currentTrackIdRef = useRef(null)
   const touchStartX = useRef(null)
@@ -114,11 +205,64 @@ export default function Player({ onLogout }) {
   const lastUpdateRef = useRef(Date.now())
   const lyricsStageRef = useRef(null)
   const isPlayingRef = useRef(false)
+  const autoFocusTimerRef = useRef(null)
+  const lastTrackIdForInsights = useRef(null)
 
   const theme = THEMES[themeIndex]
 
+  // Online/offline detection
+  useEffect(() => {
+    const onOnline = () => setIsOnline(true)
+    const onOffline = () => setIsOnline(false)
+    window.addEventListener('online', onOnline)
+    window.addEventListener('offline', onOffline)
+    return () => { window.removeEventListener('online', onOnline); window.removeEventListener('offline', onOffline) }
+  }, [])
+
+  // Smart Focus Mode+ (Auto-hide)
+  useEffect(() => {
+    if (!isPro || !proSettings.autoFocus) return
+    const resetTimer = () => {
+      setFocusMode(false)
+      clearTimeout(autoFocusTimerRef.current)
+      autoFocusTimerRef.current = setTimeout(() => setFocusMode(true), 5000)
+    }
+    resetTimer()
+    window.addEventListener('mousemove', resetTimer)
+    window.addEventListener('touchstart', resetTimer)
+    return () => {
+      clearTimeout(autoFocusTimerRef.current)
+      window.removeEventListener('mousemove', resetTimer)
+      window.removeEventListener('touchstart', resetTimer)
+    }
+  }, [isPro, proSettings.autoFocus])
+
   // Keep isPlayingRef in sync
   useEffect(() => { isPlayingRef.current = isPlaying }, [isPlaying])
+
+  // Detect mood when lyrics change
+  useEffect(() => {
+    if (isPro && lyrics.length > 0) {
+      setMood(detectMood(lyrics))
+    } else {
+      setMood(null)
+    }
+  }, [lyrics, isPro])
+
+  // Smart Loop: seek back when reaching loop end
+  useEffect(() => {
+    if (!loopActive || loopStart === null || loopEnd === null) return
+    if (progressMs >= loopEnd) {
+      seekToPosition(loopStart).catch(() => {})
+      progressRef.current = loopStart
+      lastUpdateRef.current = Date.now()
+      setProgressMs(loopStart)
+    }
+  }, [progressMs, loopActive, loopStart, loopEnd])
+
+  // Instrumental gaps detection
+  const instrumentalGaps = lyrics.length > 0 ? findInstrumentalGaps(lyrics) : new Set()
+  const isInstrumental = currentLine >= 0 && instrumentalGaps.has(currentLine) && !lyrics[currentLine]?.text?.trim()
 
   const updateProSetting = useCallback((key, val) => {
     setProSettings(prev => {
@@ -152,6 +296,57 @@ export default function Player({ onLogout }) {
       return next
     })
   }, [])
+
+  const cycleVisualizer = useCallback((e) => {
+    e.stopPropagation()
+    if (!visualizerEnabled) {
+      setVisualizerEnabled(true)
+    } else {
+      const next = (visualizerStyle + 1) % VISUALIZER_STYLES.length
+      if (next === 0) {
+        setVisualizerEnabled(false)
+      }
+      setVisualizerStyle(next)
+    }
+  }, [visualizerEnabled, visualizerStyle])
+
+  const toggleLoop = useCallback((e) => {
+    e.stopPropagation()
+    if (loopActive) {
+      setLoopActive(false)
+      setLoopStart(null)
+      setLoopEnd(null)
+    } else {
+      setLoopActive(true)
+      setLoopStart(null)
+      setLoopEnd(null)
+    }
+  }, [loopActive])
+
+  const handleLoopLineTap = useCallback((lineTime) => {
+    if (!loopActive) return
+    const timeMs = lineTime * 1000
+    if (loopStart === null) {
+      setLoopStart(timeMs)
+    } else if (loopEnd === null) {
+      if (timeMs > loopStart) {
+        setLoopEnd(timeMs)
+      } else {
+        setLoopStart(timeMs)
+      }
+    }
+  }, [loopActive, loopStart, loopEnd])
+
+  const handleLyricClick = useCallback((e, line, index) => {
+    e.stopPropagation()
+    if (loopActive && isPro) {
+      handleLoopLineTap(line.time)
+      return
+    }
+    if (isPro) {
+      setMeaningLine(meaningLine === index ? null : index)
+    }
+  }, [loopActive, isPro, handleLoopLineTap, meaningLine])
 
   const handleTouchStart = useCallback((e) => {
     touchStartX.current = e.touches[0].clientX
@@ -260,7 +455,7 @@ export default function Player({ onLogout }) {
 
   const clearTranslation = useCallback(() => { setTranslatedLyrics(null) }, [])
 
-  // Export lyric card — redesigned with format picker & innovative features
+  // Export lyric card
   const exportLyricCard = useCallback(async () => {
     if (!track) return
     const hasLyric = currentLine >= 0 && lyrics[currentLine]
@@ -272,7 +467,6 @@ export default function Player({ onLogout }) {
       canvas.width = W; canvas.height = H
       const ctx = canvas.getContext('2d')
 
-      // Load album art
       let bgImg = null
       if (track.album?.images?.[0]?.url) {
         try {
@@ -282,7 +476,6 @@ export default function Player({ onLogout }) {
         } catch { bgImg = null }
       }
 
-      // Background: blurred album art
       if (bgImg) {
         ctx.filter = 'blur(80px) brightness(0.35) saturate(1.4)'
         const scale = Math.max(W / bgImg.width, H / bgImg.height) * 1.3
@@ -294,15 +487,12 @@ export default function Player({ onLogout }) {
         ctx.fillRect(0, 0, W, H)
       }
 
-      // Dark overlay
       ctx.fillStyle = 'rgba(0,0,0,0.35)'
       ctx.fillRect(0, 0, W, H)
 
-      // Parse accent color for gradient effects
       const accentMatch = accentColor.match(/\d+/g) || ['250', '60', '80']
       const [ar, ag, ab] = accentMatch.map(Number)
 
-      // Innovative feature: Sound wave visualization at the bottom
       const waveY = fmt.id === 'story' ? H * 0.88 : (fmt.id === 'square' ? H * 0.85 : H * 0.82)
       const waveH = fmt.id === 'story' ? 80 : 60
       const barCount = fmt.id === 'wide' ? 120 : 80
@@ -312,19 +502,13 @@ export default function Player({ onLogout }) {
       ctx.save()
       for (let i = 0; i < barCount; i++) {
         const t = i / barCount
-        // Generate pseudo-random wave heights based on position
         const seed = Math.sin(t * 47.3 + 12.9) * 43758.5453
         const h1 = Math.abs(Math.sin(seed)) * 0.7 + 0.3
         const h2 = Math.abs(Math.sin(seed * 1.7 + 0.5)) * 0.5 + 0.2
         const height = (h1 * 0.6 + h2 * 0.4) * waveH
-
         const x = 60 + i * barW
         const played = t <= songProgress
-        if (played) {
-          ctx.fillStyle = `rgba(${ar},${ag},${ab},0.8)`
-        } else {
-          ctx.fillStyle = 'rgba(255,255,255,0.15)'
-        }
+        ctx.fillStyle = played ? `rgba(${ar},${ag},${ab},0.8)` : 'rgba(255,255,255,0.15)'
         const radius = Math.min(barW * 0.3, 3)
         const barX = x + barW * 0.15
         const barWidth = barW * 0.7
@@ -334,7 +518,6 @@ export default function Player({ onLogout }) {
       }
       ctx.restore()
 
-      // Innovative feature: Circular progress ring around album art
       const isStory = fmt.id === 'story'
       const isSquare = fmt.id === 'square'
       const artSize = isStory ? 300 : (isSquare ? 280 : 240)
@@ -344,14 +527,12 @@ export default function Player({ onLogout }) {
       const ringCx = artX + artSize / 2
       const ringCy = artY + artSize / 2
 
-      // Ring background
       ctx.beginPath()
       ctx.arc(ringCx, ringCy, ringRadius, 0, Math.PI * 2)
       ctx.strokeStyle = 'rgba(255,255,255,0.08)'
       ctx.lineWidth = 4
       ctx.stroke()
 
-      // Ring progress
       ctx.beginPath()
       ctx.arc(ringCx, ringCy, ringRadius, -Math.PI / 2, -Math.PI / 2 + songProgress * Math.PI * 2)
       const ringGrad = ctx.createLinearGradient(ringCx - ringRadius, ringCy, ringCx + ringRadius, ringCy)
@@ -362,7 +543,6 @@ export default function Player({ onLogout }) {
       ctx.lineCap = 'round'
       ctx.stroke()
 
-      // Album art (rounded)
       if (bgImg) {
         ctx.save()
         ctx.beginPath()
@@ -372,7 +552,6 @@ export default function Player({ onLogout }) {
         ctx.restore()
       }
 
-      // Track info
       const font = '-apple-system, SF Pro Display, sans-serif'
       const infoX = fmt.id === 'wide' ? artX + artSize + 60 : W / 2
       const infoAlign = fmt.id === 'wide' ? 'left' : 'center'
@@ -388,7 +567,6 @@ export default function Player({ onLogout }) {
       ctx.font = `${isStory ? 26 : 22}px ${font}`
       ctx.fillText(track.artists?.map(a => a.name).join(', ') || '', infoX, titleY + (isStory ? 42 : 36), maxTextW)
 
-      // Lyrics (if enabled and available)
       if (exportWithLyrics && hasLyric) {
         const lyricText = lyrics[currentLine].text
         const lyricY = isStory ? titleY + 100 : (isSquare ? titleY + 80 : titleY + 80)
@@ -396,7 +574,6 @@ export default function Player({ onLogout }) {
         ctx.font = `bold ${isStory ? 48 : 36}px ${font}`
         ctx.textAlign = infoAlign
 
-        // Word wrap
         const words = lyricText.split(' ')
         const lyricLines = []
         let line = ''
@@ -408,7 +585,6 @@ export default function Player({ onLogout }) {
         const lh = isStory ? 62 : 48
         lyricLines.forEach((l, i) => { ctx.fillText(l, infoX, lyricY + i * lh, maxTextW + 40) })
 
-        // Context lyrics (prev/next) - dimmed
         ctx.font = `${isStory ? 24 : 20}px ${font}`
         if (currentLine > 0 && lyrics[currentLine - 1]?.text) {
           ctx.fillStyle = 'rgba(255,255,255,0.2)'
@@ -420,19 +596,16 @@ export default function Player({ onLogout }) {
         }
       }
 
-      // Innovative: Timestamp + Song progress text
       const timeStr = formatTime(progressMs) + ' / ' + formatTime(durationMs)
       ctx.textAlign = 'center'
       ctx.fillStyle = 'rgba(255,255,255,0.25)'
       ctx.font = `500 ${isStory ? 20 : 16}px ${font}`
       ctx.fillText(timeStr, W / 2, waveY + waveH / 2 + (isStory ? 30 : 24))
 
-      // Branding
       ctx.fillStyle = 'rgba(255,255,255,0.2)'
       ctx.font = `bold ${isStory ? 22 : 18}px ${font}`
       ctx.fillText('LyricFlow', W / 2, H - (isStory ? 50 : 36))
 
-      // Innovative: Small Spotify code / scan indicator
       const scanY = H - (isStory ? 90 : 64)
       ctx.fillStyle = 'rgba(255,255,255,0.12)'
       ctx.font = `500 ${isStory ? 14 : 12}px ${font}`
@@ -465,7 +638,7 @@ export default function Player({ onLogout }) {
       let lines = []
       if (data.syncedLyrics) { lines = parseLRC(data.syncedLyrics) }
       else if (data.plainLyrics) { lines = data.plainLyrics.split('\n').map((text, i) => ({ time: i * 4, text: text.trim() })).filter(l => l.text) }
-      if (lines.length) lyricsCache.set(cacheKey, lines)
+      if (lines.length) { lyricsCache.set(cacheKey, lines); persistLyricsCache() }
       return lines
     } catch {
       try {
@@ -475,7 +648,7 @@ export default function Player({ onLogout }) {
         const results = await res.json()
         if (results.length > 0 && results[0].syncedLyrics) {
           const lines = parseLRC(results[0].syncedLyrics)
-          if (lines.length) lyricsCache.set(cacheKey, lines)
+          if (lines.length) { lyricsCache.set(cacheKey, lines); persistLyricsCache() }
           return lines
         }
       } catch {}
@@ -505,6 +678,12 @@ export default function Player({ onLogout }) {
         setStatus('loading')
         setLyrics([])
         setTranslatedLyrics(null)
+        setMeaningLine(null)
+        // Track listening insights
+        if (isPro && !proSettings.privateMode && data.item && newId !== lastTrackIdForInsights.current) {
+          lastTrackIdForInsights.current = newId
+          trackSongPlay(data.item, data.item.duration_ms)
+        }
         const art = data.item.album?.images?.[0]?.url
         if (art) extractAccentColor(art).then(setAccentColor)
         const lines = await fetchLyrics(data.item.name, data.item.artists[0].name, data.item.album.name, data.item.duration_ms)
@@ -514,7 +693,7 @@ export default function Player({ onLogout }) {
         }
       }
     } catch (e) { console.error(e) }
-  }, [fetchLyrics, isSeeking])
+  }, [fetchLyrics, isSeeking, isPro, proSettings.privateMode])
 
   // Fast polling: 2s
   useEffect(() => {
@@ -552,7 +731,7 @@ export default function Player({ onLogout }) {
     if (idx !== currentLine) setCurrentLine(idx)
   }, [progressMs, lyrics, currentLine])
 
-  // Scroll active line to center — precise centering with scrollTo
+  // Scroll active line to center
   useEffect(() => {
     if (currentLine < 0 || viewMode !== 'flow') return
     const el = lineRefs.current[currentLine]
@@ -577,12 +756,37 @@ export default function Player({ onLogout }) {
   const fontScale = proSettings.fontSize / 100
   const isLeft = proSettings.lyricAlign === 'left'
 
+  // Compute mood-based accent color
+  const effectiveAccent = (isPro && mood && MOOD_COLORS[mood]) ? MOOD_COLORS[mood] : accentColor
+  const glowMult = (proSettings.glowIntensity || 100) / 100
+  const animSpeed = (proSettings.animationSpeed || 100) / 100
+
+  // Loop progress bar indicators
+  const loopStartPct = (loopStart !== null && durationMs) ? (loopStart / durationMs) * 100 : null
+  const loopEndPct = (loopEnd !== null && durationMs) ? (loopEnd / durationMs) * 100 : null
+
+  // Check if a line is in the loop range
+  const isLineInLoop = (lineTime) => {
+    if (!loopActive || loopStart === null) return false
+    const timeMs = lineTime * 1000
+    if (loopEnd !== null) return timeMs >= loopStart && timeMs <= loopEnd
+    return timeMs === loopStart
+  }
+
+  // Check if between lyrics (instrumental)
+  const isInstrumentalSection = currentLine >= 0 && lyrics[currentLine] && !lyrics[currentLine].text.trim() && currentLine < lyrics.length - 1 && ((lyrics[currentLine + 1].time - lyrics[currentLine].time) >= 8)
+
   return (
     <div
       className={`player${focusMode ? ' focus' : ''}${isPro && proSettings.blurEnabled ? ' pro-mode' : ''} view-${viewMode}`}
       data-theme={theme}
-      style={{ '--accent': accentColor, '--font-scale': fontScale }}
-      onClick={() => setFocusMode(v => !v)}
+      style={{
+        '--accent': effectiveAccent,
+        '--font-scale': fontScale,
+        '--glow-intensity': glowMult,
+        '--anim-speed': animSpeed,
+      }}
+      onClick={() => { if (!proSettings.autoFocus || !isPro) setFocusMode(v => !v) }}
       onTouchStart={handleTouchStart}
       onTouchEnd={handleTouchEnd}
     >
@@ -591,6 +795,24 @@ export default function Player({ onLogout }) {
       <div className="ambient-orb" />
       <div className="ambient-orb" />
       <div className="bg-vignette" />
+
+      {/* Visualizer background */}
+      {isPro && visualizerEnabled && (
+        <Visualizer
+          style={VISUALIZER_STYLES[visualizerStyle]}
+          progressMs={progressMs}
+          accentColor={effectiveAccent}
+          isPlaying={isPlaying}
+        />
+      )}
+
+      {/* Offline indicator */}
+      {!isOnline && (
+        <div className="offline-badge">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55"/><path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39"/><path d="M10.71 5.05A16 16 0 0 1 22.56 9"/><path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
+          Offline
+        </div>
+      )}
 
       <div className="topbar" onClick={e => e.stopPropagation()}>
         <div className="topbar-left">
@@ -609,6 +831,44 @@ export default function Player({ onLogout }) {
           <div className={`bars${isPlaying ? ' active' : ''}`}>
             <span /><span /><span /><span />
           </div>
+
+          {/* Mood badge */}
+          {isPro && mood && (
+            <div className="mood-badge" style={{ color: MOOD_COLORS[mood] }}>
+              {MOOD_EMOJIS[mood]} {mood.charAt(0).toUpperCase() + mood.slice(1)}
+            </div>
+          )}
+
+          {/* Private mode indicator */}
+          {isPro && proSettings.privateMode && (
+            <div className="private-badge" title="Private Mode">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+            </div>
+          )}
+
+          {/* Visualizer toggle (PRO) */}
+          {isPro && (
+            <button
+              className={`icon-btn${visualizerEnabled ? ' active-feature' : ''}`}
+              onClick={cycleVisualizer}
+              title={visualizerEnabled ? `Visualizer: ${VISUALIZER_STYLES[visualizerStyle]}` : 'Enable Visualizer'}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <path d="M2 12h2m4 0h2m4 0h2m4 0h2"/><path d="M6 8v8"/><path d="M10 6v12"/><path d="M14 9v6"/><path d="M18 7v10"/>
+              </svg>
+            </button>
+          )}
+
+          {/* Insights button (PRO) */}
+          {isPro && (
+            <button
+              className="icon-btn"
+              onClick={(e) => { e.stopPropagation(); setShowInsights(true) }}
+              title="Listening Insights"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>
+            </button>
+          )}
 
           {isPro && (
             <button
@@ -649,15 +909,15 @@ export default function Player({ onLogout }) {
           </button>
 
           <button className="icon-btn" onClick={cycleTheme} title="Change theme">
-            {theme === 'dark' ? '◐' : theme === 'neon' ? '✦' : theme === 'glass' ? '◈' : '○'}
+            {theme === 'dark' ? '\u25D0' : theme === 'neon' ? '\u2726' : theme === 'glass' ? '\u25C8' : '\u25CB'}
           </button>
           <button
             className={`icon-btn pro-btn${isPro ? ' pro-active' : ''}`}
-            style={isPro ? { background: `linear-gradient(135deg, color-mix(in srgb, ${accentColor} 30%, transparent), color-mix(in srgb, ${accentColor} 15%, transparent))`, borderColor: `color-mix(in srgb, ${accentColor} 40%, transparent)`, color: accentColor } : undefined}
+            style={isPro ? { background: `linear-gradient(135deg, color-mix(in srgb, ${effectiveAccent} 30%, transparent), color-mix(in srgb, ${effectiveAccent} 15%, transparent))`, borderColor: `color-mix(in srgb, ${effectiveAccent} 40%, transparent)`, color: effectiveAccent } : undefined}
             onClick={(e) => { e.stopPropagation(); if (isPro) { localStorage.removeItem('lf_pro'); setIsPro(false) } else { setShowPremium(true) } }}
             title={isPro ? 'Pro Active' : 'Upgrade to Pro'}
           >
-            {isPro ? '★' : 'PRO'}
+            {isPro ? '\u2605' : 'PRO'}
           </button>
           <button className="icon-btn" onClick={onLogout} title="Logout">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
@@ -696,7 +956,6 @@ export default function Player({ onLogout }) {
             <h3 className="share-title">Share This Moment</h3>
             <p className="share-subtitle">Create a beautiful card to share</p>
 
-            {/* Format picker */}
             <div className="format-picker">
               {EXPORT_FORMATS.map(fmt => (
                 <button
@@ -711,7 +970,6 @@ export default function Player({ onLogout }) {
               ))}
             </div>
 
-            {/* Lyrics toggle */}
             <div className="share-option-row">
               <span>Include lyrics</span>
               <button className={`setting-toggle${exportWithLyrics ? ' on' : ''}`} onClick={() => setExportWithLyrics(v => !v)}>
@@ -719,7 +977,6 @@ export default function Player({ onLogout }) {
               </button>
             </div>
 
-            {/* Features info */}
             <div className="share-features">
               <div className="share-feature-tag">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
@@ -735,7 +992,6 @@ export default function Player({ onLogout }) {
               </div>
             </div>
 
-            {/* Action buttons */}
             <div className="share-actions">
               <button className="btn-primary share-download" onClick={() => { exportLyricCard() }}>
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -782,6 +1038,39 @@ export default function Player({ onLogout }) {
                 <button className={proSettings.lyricAlign === 'center' ? 'active' : ''} onClick={() => updateProSetting('lyricAlign', 'center')}>Center</button>
                 <button className={proSettings.lyricAlign === 'left' ? 'active' : ''} onClick={() => updateProSetting('lyricAlign', 'left')}>Left</button>
               </div>
+            </div>
+
+            {/* Advanced Theme Engine */}
+            <div className="setting-row">
+              <label>Glow Intensity</label>
+              <div className="setting-control">
+                <span className="setting-val">{proSettings.glowIntensity || 100}%</span>
+                <input type="range" min="0" max="200" step="10" value={proSettings.glowIntensity || 100} onChange={e => updateProSetting('glowIntensity', +e.target.value)} />
+              </div>
+            </div>
+
+            <div className="setting-row">
+              <label>Animation Speed</label>
+              <div className="setting-control">
+                <span className="setting-val">{proSettings.animationSpeed || 100}%</span>
+                <input type="range" min="50" max="200" step="10" value={proSettings.animationSpeed || 100} onChange={e => updateProSetting('animationSpeed', +e.target.value)} />
+              </div>
+            </div>
+
+            {/* Auto Focus toggle */}
+            <div className="setting-row">
+              <label>Auto Focus</label>
+              <button className={`setting-toggle${proSettings.autoFocus ? ' on' : ''}`} onClick={() => updateProSetting('autoFocus', !proSettings.autoFocus)}>
+                <div className="toggle-knob" />
+              </button>
+            </div>
+
+            {/* Private Mode toggle */}
+            <div className="setting-row">
+              <label>Private Mode</label>
+              <button className={`setting-toggle${proSettings.privateMode ? ' on' : ''}`} onClick={() => updateProSetting('privateMode', !proSettings.privateMode)}>
+                <div className="toggle-knob" />
+              </button>
             </div>
           </div>
         </div>
@@ -842,18 +1131,42 @@ export default function Player({ onLogout }) {
           )}
           {status === 'playing' && (
             <div className={`lyrics-list${isLeft ? ' align-left' : ''}`}>
-              {displayLyrics.map((line, i) => (
-                <div key={`${track?.id}-${i}`} ref={el => { lineRefs.current[i] = el }} className={lineClass(i, currentLine, isPro, proSettings.blurEnabled)}>
-                  <span className="lyric-text">{line.text || <span className="dot">·</span>}</span>
-                  {line.translation && <span className="lyric-translation">{line.translation}</span>}
-                </div>
-              ))}
+              {displayLyrics.map((line, i) => {
+                const isLooped = isPro && isLineInLoop(line.time)
+                const isActive = i === currentLine
+                const isInstrumentalLine = isPro && isActive && !line.text.trim() && i < displayLyrics.length - 1 && ((displayLyrics[i + 1].time - line.time) >= 8)
+                return (
+                  <div key={`${track?.id}-${i}`} ref={el => { lineRefs.current[i] = el }}
+                    className={`${lineClass(i, currentLine, isPro, proSettings.blurEnabled)}${isLooped ? ' loop-highlight' : ''}${isActive && isPro ? ' dynamic-typo' : ''}${translatedLyrics ? ' has-translation' : ''}`}
+                    onClick={(e) => handleLyricClick(e, line, i)}
+                  >
+                    {isInstrumentalLine ? (
+                      <span className="instrumental-indicator">
+                        <span className="instrumental-note">{'\u266A'}</span> Instrumental
+                      </span>
+                    ) : (
+                      <>
+                        <span className="lyric-text">{line.text || <span className="dot">{'\u00B7'}</span>}</span>
+                        {line.translation && <span className="lyric-translation">{line.translation}</span>}
+                      </>
+                    )}
+                    {/* Lyric meaning popup */}
+                    {isPro && meaningLine === i && line.text.trim() && (
+                      <LyricMeaning
+                        text={line.text}
+                        artistName={track?.artists?.[0]?.name}
+                        onClose={() => setMeaningLine(null)}
+                      />
+                    )}
+                  </div>
+                )
+              })}
             </div>
           )}
         </div>
       )}
 
-      {/* KARAOKE view mode - single active line centered */}
+      {/* KARAOKE view mode */}
       {viewMode === 'karaoke' && (
         <div className="lyrics-stage karaoke-stage" onClick={e => e.stopPropagation()}>
           {(status === 'loading' || status === 'no-track' || status === 'no-lyrics') ? (
@@ -892,10 +1205,14 @@ export default function Player({ onLogout }) {
               {currentLine > 0 && displayLyrics[currentLine - 1]?.text && (
                 <div className="karaoke-prev">{displayLyrics[currentLine - 1].text}</div>
               )}
-              <div className="karaoke-active" key={currentLine}>
+              <div className={`karaoke-active${isPro ? ' dynamic-typo' : ''}`} key={currentLine}>
                 {currentLine >= 0 && displayLyrics[currentLine]?.text
                   ? displayLyrics[currentLine].text
-                  : '♪'
+                  : (isPro && isInstrumentalSection ? (
+                      <span className="instrumental-indicator instrumental-karaoke">
+                        <span className="instrumental-note">{'\u266A'}</span> Instrumental
+                      </span>
+                    ) : '\u266A')
                 }
               </div>
               {currentLine >= 0 && currentLine < displayLyrics.length - 1 && displayLyrics[currentLine + 1]?.text && (
@@ -906,7 +1223,7 @@ export default function Player({ onLogout }) {
         </div>
       )}
 
-      {/* IMMERSIVE view mode - big album art + lyric */}
+      {/* IMMERSIVE view mode */}
       {viewMode === 'immersive' && (
         <div className="lyrics-stage immersive-stage" onClick={e => e.stopPropagation()}>
           <div className="immersive-content">
@@ -916,12 +1233,12 @@ export default function Player({ onLogout }) {
               <span className="immersive-artist">{track?.artists?.map(a => a.name).join(', ') || ''}</span>
             </div>
             {status === 'playing' && currentLine >= 0 && displayLyrics[currentLine] && (
-              <div className="immersive-lyric" key={currentLine}>
+              <div className={`immersive-lyric${isPro ? ' dynamic-typo' : ''}`} key={currentLine}>
                 {displayLyrics[currentLine].text}
               </div>
             )}
             {status === 'playing' && (currentLine < 0 || !displayLyrics[currentLine]?.text) && (
-              <div className="immersive-lyric dim">♪</div>
+              <div className="immersive-lyric dim">{'\u266A'}</div>
             )}
           </div>
         </div>
@@ -929,11 +1246,20 @@ export default function Player({ onLogout }) {
 
       {/* Controls + Progress */}
       <div className="controls-section" onClick={e => e.stopPropagation()}>
-        {/* Playback controls */}
         <div className="playback-controls">
           <button className="ctrl-btn" onClick={handleSkipPrev} title="Previous">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="white"><path d="M6 6h2v12H6V6zm3.5 6 8.5 6V6l-8.5 6z"/></svg>
           </button>
+
+          {/* Loop button (PRO) */}
+          {isPro && (
+            <button className={`ctrl-btn ctrl-loop${loopActive ? ' loop-active' : ''}`} onClick={toggleLoop} title={loopActive ? 'Clear Loop' : 'Set Loop'}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={loopActive ? 'var(--accent)' : 'white'} strokeWidth="2" strokeLinecap="round">
+                <polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>
+              </svg>
+            </button>
+          )}
+
           <button className="ctrl-btn ctrl-play" onClick={handlePlayPause} title={isPlaying ? 'Pause' : 'Play'}>
             {isPlaying ? (
               <svg width="28" height="28" viewBox="0 0 24 24" fill="white"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
@@ -946,8 +1272,15 @@ export default function Player({ onLogout }) {
           </button>
         </div>
 
-        {/* Progress bar */}
-        <div className="prog-bar prog-bar-seek" onClick={handleSeek}>
+        {/* Progress bar with loop indicator */}
+        <div className="prog-bar prog-bar-seek" onClick={handleSeek} style={{ position: 'relative' }}>
+          {/* Loop range indicator */}
+          {isPro && loopActive && loopStartPct !== null && loopEndPct !== null && (
+            <div className="loop-range" style={{ left: `${loopStartPct}%`, width: `${loopEndPct - loopStartPct}%` }} />
+          )}
+          {isPro && loopActive && loopStartPct !== null && loopEndPct === null && (
+            <div className="loop-marker" style={{ left: `${loopStartPct}%` }} />
+          )}
           <div className="prog-fill" style={{ width: `${progress}%` }} />
           <div className="prog-thumb" style={{ left: `${progress}%` }} />
         </div>
@@ -956,6 +1289,11 @@ export default function Player({ onLogout }) {
           <span>{formatTime(durationMs)}</span>
         </div>
       </div>
+
+      {/* Insights Modal */}
+      {showInsights && isPro && (
+        <Insights onClose={() => setShowInsights(false)} accentColor={effectiveAccent} />
+      )}
 
       {/* Premium Modal */}
       {showPremium && (
@@ -968,36 +1306,68 @@ export default function Player({ onLogout }) {
             <h2>Unlock LyricFlow Pro</h2>
             <p className="premium-subtitle">The ultimate lyrics experience</p>
 
-            <div className="premium-feature-showcase">
-              <div className="showcase-item">
-                <div className="showcase-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg></div>
-                <div><strong>Cinematic Blur Mode</strong><p>Only the current lyric is crystal clear — the rest fades into a cinematic blur</p></div>
-              </div>
-              <div className="showcase-item">
-                <div className="showcase-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></div>
-                <div><strong>Live Translation</strong><p>Translate lyrics in real-time to 15+ languages</p></div>
-              </div>
-              <div className="showcase-item">
-                <div className="showcase-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></div>
-                <div><strong>Share Cards</strong><p>Stunning cards with waveform viz, progress ring, and album colors</p></div>
-              </div>
-              <div className="showcase-item">
-                <div className="showcase-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4m0 14v4m-8.66-15 3.46 2m10.4 6 3.46 2M1 12h4m14 0h4m-15.66 8.66 2-3.46m6-10.4 2-3.46M4.34 4.34l3.46 2m8.4 8.4 3.46 2"/></svg></div>
-                <div><strong>Full Customization</strong><p>Font size, alignment, blur toggle, view modes — make it yours</p></div>
-              </div>
+            {/* Premium tabs */}
+            <div className="premium-tabs">
+              <button className={`premium-tab${premiumTab === 'features' ? ' active' : ''}`} onClick={() => setPremiumTab('features')}>Features</button>
+              <button className={`premium-tab${premiumTab === 'labs' ? ' active' : ''}`} onClick={() => setPremiumTab('labs')}>Labs</button>
             </div>
 
-            <div className="premium-pricing">
-              <div className="premium-price-card active">
-                <span className="price-tag">Monthly</span>
-                <div className="premium-price"><span className="price-amount">$4.99</span><span className="price-period">/mo</span></div>
+            {premiumTab === 'features' && (
+              <>
+                <div className="premium-feature-showcase">
+                  <div className="showcase-item">
+                    <div className="showcase-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg></div>
+                    <div><strong>Cinematic Blur Mode</strong><p>Only the current lyric is crystal clear — the rest fades into a cinematic blur</p></div>
+                  </div>
+                  <div className="showcase-item">
+                    <div className="showcase-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></div>
+                    <div><strong>Live Translation</strong><p>Translate lyrics in real-time to 15+ languages</p></div>
+                  </div>
+                  <div className="showcase-item">
+                    <div className="showcase-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></div>
+                    <div><strong>Share Cards</strong><p>Stunning cards with waveform viz, progress ring, and album colors</p></div>
+                  </div>
+                  <div className="showcase-item">
+                    <div className="showcase-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4m0 14v4m-8.66-15 3.46 2m10.4 6 3.46 2M1 12h4m14 0h4m-15.66 8.66 2-3.46m6-10.4 2-3.46M4.34 4.34l3.46 2m8.4 8.4 3.46 2"/></svg></div>
+                    <div><strong>Full Customization</strong><p>Font size, alignment, blur toggle, view modes — make it yours</p></div>
+                  </div>
+                </div>
+
+                <div className="premium-pricing">
+                  <div className="premium-price-card active">
+                    <span className="price-tag">Monthly</span>
+                    <div className="premium-price"><span className="price-amount">$4.99</span><span className="price-period">/mo</span></div>
+                  </div>
+                  <div className="premium-price-card">
+                    <span className="price-tag">Lifetime</span>
+                    <div className="premium-price"><span className="price-amount">$29.99</span><span className="price-period">once</span></div>
+                    <span className="price-save">Save 75%</span>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {premiumTab === 'labs' && (
+              <div className="labs-section">
+                <p className="labs-description">Experimental features coming soon</p>
+                <div className="labs-grid">
+                  {[
+                    { name: 'Voice Control', icon: '\u{1F3A4}', desc: 'Control playback with your voice' },
+                    { name: 'Spatial Audio', icon: '\u{1F50A}', desc: '3D audio visualization' },
+                    { name: 'Community Themes', icon: '\u{1F3A8}', desc: 'Share and download themes' },
+                    { name: 'Sing Mode', icon: '\u{1F3B5}', desc: 'Karaoke scoring system' },
+                    { name: 'Beat Sync Engine', icon: '\u{26A1}', desc: 'AI-powered beat detection' },
+                  ].map(lab => (
+                    <div key={lab.name} className="lab-card">
+                      <span className="lab-icon">{lab.icon}</span>
+                      <strong>{lab.name}</strong>
+                      <p>{lab.desc}</p>
+                      <span className="coming-soon-badge">Coming Soon</span>
+                    </div>
+                  ))}
+                </div>
               </div>
-              <div className="premium-price-card">
-                <span className="price-tag">Lifetime</span>
-                <div className="premium-price"><span className="price-amount">$29.99</span><span className="price-period">once</span></div>
-                <span className="price-save">Save 75%</span>
-              </div>
-            </div>
+            )}
 
             <button className="btn-primary premium-cta" onClick={activatePro}>Activate Pro — Free Trial</button>
             <p className="premium-note">7 days free, cancel anytime</p>
