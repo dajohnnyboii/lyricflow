@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import Login from './components/Login'
+import Homepage from './components/Homepage'
 import Player from './components/Player'
 import { exchangeCode, logout, isLoggedIn } from './spotify'
 import './index.css'
@@ -35,12 +35,18 @@ export default function App() {
   if (loading) {
     return (
       <div className="loading-screen">
-        <div className="spinner" />
+        <div className="loading-logo">
+          <div className="logo-icon pulse">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
+              <path d="M6 9Q12 6 18 8M5 13Q12 10 19 12M7 17Q12 14 17 16" stroke="white" strokeWidth="2" strokeLinecap="round"/>
+            </svg>
+          </div>
+        </div>
       </div>
     )
   }
 
   return authed
     ? <Player onLogout={() => { logout(); setAuthed(false) }} />
-    : <Login />
+    : <Homepage />
 }

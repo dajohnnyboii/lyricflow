@@ -1,8 +1,9 @@
 const REDIRECT_URI = window.location.origin
 const SCOPES = ['user-read-currently-playing', 'user-read-playback-state']
+const SPOTIFY_CLIENT_ID = 'f7f4d50c955942d4951900ffddbf0a3f'
 
 function getClientId() {
-  return import.meta.env.VITE_SPOTIFY_CLIENT_ID || localStorage.getItem('spotify_client_id') || ''
+  return SPOTIFY_CLIENT_ID
 }
 
 function generateCodeVerifier() {
@@ -25,14 +26,13 @@ function base64urlEncode(array) {
     .replace(/=/g, '')
 }
 
-export async function initiateLogin(clientId) {
+export async function initiateLogin() {
   const verifier = generateCodeVerifier()
   const challenge = await generateCodeChallenge(verifier)
   sessionStorage.setItem('code_verifier', verifier)
-  if (clientId) localStorage.setItem('spotify_client_id', clientId)
 
   const params = new URLSearchParams({
-    client_id: clientId || getClientId(),
+    client_id: getClientId(),
     response_type: 'code',
     redirect_uri: REDIRECT_URI,
     scope: SCOPES.join(' '),
