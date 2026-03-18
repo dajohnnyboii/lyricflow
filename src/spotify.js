@@ -122,6 +122,42 @@ export async function seekToPosition(positionMs) {
   })
 }
 
+export async function pausePlayback() {
+  const token = await getAccessToken()
+  if (!token) return
+  await fetch('https://api.spotify.com/v1/me/player/pause', {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export async function resumePlayback() {
+  const token = await getAccessToken()
+  if (!token) return
+  await fetch('https://api.spotify.com/v1/me/player/play', {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export async function skipToNext() {
+  const token = await getAccessToken()
+  if (!token) return
+  await fetch('https://api.spotify.com/v1/me/player/next', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export async function skipToPrevious() {
+  const token = await getAccessToken()
+  if (!token) return
+  await fetch('https://api.spotify.com/v1/me/player/previous', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
 export function logout() {
   localStorage.removeItem('access_token')
   localStorage.removeItem('refresh_token')

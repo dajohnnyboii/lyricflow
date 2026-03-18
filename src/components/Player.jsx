@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { getCurrentlyPlaying, seekToPosition } from '../spotify'
+import { getCurrentlyPlaying, seekToPosition, pausePlayback, resumePlayback, skipToNext, skipToPrevious } from '../spotify'
 import { parseLRC, getCurrentLineIndex } from '../lrc'
 
 const THEMES = ['dark', 'neon', 'glass', 'minimal']
+const VIEW_MODES = ['flow', 'karaoke', 'immersive']
 
 const LANGUAGES = [
   { code: 'en', name: 'English' },
@@ -22,10 +23,16 @@ const LANGUAGES = [
   { code: 'sv', name: 'Swedish' },
 ]
 
+const EXPORT_FORMATS = [
+  { id: 'story', label: 'Story', w: 1080, h: 1920, ratio: '9:16' },
+  { id: 'square', label: 'Square', w: 1080, h: 1080, ratio: '1:1' },
+  { id: 'wide', label: 'Wide', w: 1920, h: 1080, ratio: '16:9' },
+]
+
 const DEFAULT_PRO_SETTINGS = {
-  fontSize: 100,       // percentage: 80-140
+  fontSize: 100,
   blurEnabled: true,
-  lyricAlign: 'center', // center | left
+  lyricAlign: 'center',
 }
 
 function getProSettings() {
@@ -92,6 +99,9 @@ export default function Player({ onLogout }) {
   const [showExport, setShowExport] = useState(false)
   const [exportStatus, setExportStatus] = useState(null)
   const [isSeeking, setIsSeeking] = useState(false)
+  const [viewMode, setViewMode] = useState(() => localStorage.getItem('lf_view') || 'flow')
+  const [exportFormat, setExportFormat] = useState('story')
+  const [exportWithLyrics, setExportWithLyrics] = useState(true)
   const [themeIndex, setThemeIndex] = useState(() => {
     const saved = localStorage.getItem('lf_theme')
     return saved ? (THEMES.indexOf(saved) === -1 ? 0 : THEMES.indexOf(saved)) : 0
@@ -103,10 +113,13 @@ export default function Player({ onLogout }) {
   const animFrameRef = useRef(null)
   const lastUpdateRef = useRef(Date.now())
   const lyricsStageRef = useRef(null)
+  const isPlayingRef = useRef(false)
 
   const theme = THEMES[themeIndex]
 
-  // Save pro settings
+  // Keep isPlayingRef in sync
+  useEffect(() => { isPlayingRef.current = isPlaying }, [isPlaying])
+
   const updateProSetting = useCallback((key, val) => {
     setProSettings(prev => {
       const next = { ...prev, [key]: val }
@@ -130,6 +143,16 @@ export default function Player({ onLogout }) {
     })
   }, [])
 
+  const cycleViewMode = useCallback((e) => {
+    e.stopPropagation()
+    setViewMode(v => {
+      const idx = VIEW_MODES.indexOf(v)
+      const next = VIEW_MODES[(idx + 1) % VIEW_MODES.length]
+      localStorage.setItem('lf_view', next)
+      return next
+    })
+  }, [])
+
   const handleTouchStart = useCallback((e) => {
     touchStartX.current = e.touches[0].clientX
   }, [])
@@ -147,6 +170,33 @@ export default function Player({ onLogout }) {
     }
   }, [])
 
+  // Playback controls
+  const handlePlayPause = useCallback(async (e) => {
+    e.stopPropagation()
+    try {
+      if (isPlayingRef.current) {
+        await pausePlayback()
+        setIsPlaying(false)
+      } else {
+        await resumePlayback()
+        setIsPlaying(true)
+        lastUpdateRef.current = Date.now()
+      }
+    } catch {}
+  }, [])
+
+  const handleSkipNext = useCallback(async (e) => {
+    e.stopPropagation()
+    try { await skipToNext() } catch {}
+    setTimeout(() => { currentTrackIdRef.current = null }, 300)
+  }, [])
+
+  const handleSkipPrev = useCallback(async (e) => {
+    e.stopPropagation()
+    try { await skipToPrevious() } catch {}
+    setTimeout(() => { currentTrackIdRef.current = null }, 300)
+  }, [])
+
   // Seek on progress bar click/drag
   const handleSeek = useCallback(async (e) => {
     if (!durationMs) return
@@ -161,13 +211,8 @@ export default function Player({ onLogout }) {
     lastUpdateRef.current = Date.now()
     try {
       await seekToPosition(newMs)
-      // Re-fetch after short delay so Spotify catches up
-      setTimeout(() => {
-        setIsSeeking(false)
-      }, 500)
-    } catch {
-      setIsSeeking(false)
-    }
+      setTimeout(() => { setIsSeeking(false) }, 500)
+    } catch { setIsSeeking(false) }
   }, [durationMs])
 
   // Translation using MyMemory free API
@@ -215,69 +260,192 @@ export default function Player({ onLogout }) {
 
   const clearTranslation = useCallback(() => { setTranslatedLyrics(null) }, [])
 
-  // Export lyric card as image
+  // Export lyric card — redesigned with format picker & innovative features
   const exportLyricCard = useCallback(async () => {
-    if (!track || currentLine < 0 || !lyrics[currentLine]) return
+    if (!track) return
+    const hasLyric = currentLine >= 0 && lyrics[currentLine]
     setExportStatus('generating')
     try {
+      const fmt = EXPORT_FORMATS.find(f => f.id === exportFormat) || EXPORT_FORMATS[0]
+      const W = fmt.w, H = fmt.h
       const canvas = document.createElement('canvas')
-      canvas.width = 1080; canvas.height = 1920
+      canvas.width = W; canvas.height = H
       const ctx = canvas.getContext('2d')
+
+      // Load album art
+      let bgImg = null
       if (track.album?.images?.[0]?.url) {
         try {
-          const bgImg = new Image()
+          bgImg = new Image()
           bgImg.crossOrigin = 'anonymous'
           await new Promise((res, rej) => { bgImg.onload = res; bgImg.onerror = rej; bgImg.src = track.album.images[0].url })
-          ctx.filter = 'blur(60px) brightness(0.4)'
-          ctx.drawImage(bgImg, -100, -100, 1280, 2120)
-          ctx.filter = 'none'
-          ctx.fillStyle = 'rgba(0,0,0,0.4)'
-          ctx.fillRect(0, 0, 1080, 1920)
-        } catch { ctx.fillStyle = '#0a0a0a'; ctx.fillRect(0, 0, 1080, 1920) }
-      } else { ctx.fillStyle = '#0a0a0a'; ctx.fillRect(0, 0, 1080, 1920) }
-      if (track.album?.images?.[0]?.url) {
-        try {
-          const artImg = new Image()
-          artImg.crossOrigin = 'anonymous'
-          await new Promise((res, rej) => { artImg.onload = res; artImg.onerror = rej; artImg.src = track.album.images[0].url })
-          const artSize = 320, artX = (1080 - artSize) / 2, artY = 400
-          ctx.save(); ctx.beginPath(); ctx.roundRect(artX, artY, artSize, artSize, 24); ctx.clip()
-          ctx.drawImage(artImg, artX, artY, artSize, artSize); ctx.restore()
-        } catch {}
+        } catch { bgImg = null }
       }
-      ctx.textAlign = 'center'; ctx.fillStyle = 'white'
-      ctx.font = 'bold 42px -apple-system, SF Pro Display, sans-serif'
-      ctx.fillText(track.name, 540, 820, 900)
-      ctx.fillStyle = 'rgba(255,255,255,0.6)'
-      ctx.font = '32px -apple-system, SF Pro Display, sans-serif'
-      ctx.fillText(track.artists?.map(a => a.name).join(', ') || '', 540, 870, 900)
-      const lyricText = lyrics[currentLine].text
+
+      // Background: blurred album art
+      if (bgImg) {
+        ctx.filter = 'blur(80px) brightness(0.35) saturate(1.4)'
+        const scale = Math.max(W / bgImg.width, H / bgImg.height) * 1.3
+        const dw = bgImg.width * scale, dh = bgImg.height * scale
+        ctx.drawImage(bgImg, (W - dw) / 2, (H - dh) / 2, dw, dh)
+        ctx.filter = 'none'
+      } else {
+        ctx.fillStyle = '#0a0a0a'
+        ctx.fillRect(0, 0, W, H)
+      }
+
+      // Dark overlay
+      ctx.fillStyle = 'rgba(0,0,0,0.35)'
+      ctx.fillRect(0, 0, W, H)
+
+      // Parse accent color for gradient effects
+      const accentMatch = accentColor.match(/\d+/g) || ['250', '60', '80']
+      const [ar, ag, ab] = accentMatch.map(Number)
+
+      // Innovative feature: Sound wave visualization at the bottom
+      const waveY = fmt.id === 'story' ? H * 0.88 : (fmt.id === 'square' ? H * 0.85 : H * 0.82)
+      const waveH = fmt.id === 'story' ? 80 : 60
+      const barCount = fmt.id === 'wide' ? 120 : 80
+      const barW = (W - 120) / barCount
+      const songProgress = durationMs ? progressMs / durationMs : 0.5
+
+      ctx.save()
+      for (let i = 0; i < barCount; i++) {
+        const t = i / barCount
+        // Generate pseudo-random wave heights based on position
+        const seed = Math.sin(t * 47.3 + 12.9) * 43758.5453
+        const h1 = Math.abs(Math.sin(seed)) * 0.7 + 0.3
+        const h2 = Math.abs(Math.sin(seed * 1.7 + 0.5)) * 0.5 + 0.2
+        const height = (h1 * 0.6 + h2 * 0.4) * waveH
+
+        const x = 60 + i * barW
+        const played = t <= songProgress
+        if (played) {
+          ctx.fillStyle = `rgba(${ar},${ag},${ab},0.8)`
+        } else {
+          ctx.fillStyle = 'rgba(255,255,255,0.15)'
+        }
+        const radius = Math.min(barW * 0.3, 3)
+        const barX = x + barW * 0.15
+        const barWidth = barW * 0.7
+        ctx.beginPath()
+        ctx.roundRect(barX, waveY - height / 2, barWidth, height, radius)
+        ctx.fill()
+      }
+      ctx.restore()
+
+      // Innovative feature: Circular progress ring around album art
+      const isStory = fmt.id === 'story'
+      const isSquare = fmt.id === 'square'
+      const artSize = isStory ? 300 : (isSquare ? 280 : 240)
+      const artX = isStory ? (W - artSize) / 2 : (fmt.id === 'wide' ? 160 : (W - artSize) / 2)
+      const artY = isStory ? H * 0.2 : (isSquare ? H * 0.15 : (H - artSize) / 2)
+      const ringRadius = artSize / 2 + 12
+      const ringCx = artX + artSize / 2
+      const ringCy = artY + artSize / 2
+
+      // Ring background
+      ctx.beginPath()
+      ctx.arc(ringCx, ringCy, ringRadius, 0, Math.PI * 2)
+      ctx.strokeStyle = 'rgba(255,255,255,0.08)'
+      ctx.lineWidth = 4
+      ctx.stroke()
+
+      // Ring progress
+      ctx.beginPath()
+      ctx.arc(ringCx, ringCy, ringRadius, -Math.PI / 2, -Math.PI / 2 + songProgress * Math.PI * 2)
+      const ringGrad = ctx.createLinearGradient(ringCx - ringRadius, ringCy, ringCx + ringRadius, ringCy)
+      ringGrad.addColorStop(0, `rgb(${ar},${ag},${ab})`)
+      ringGrad.addColorStop(1, `rgba(${ar},${ag},${ab},0.5)`)
+      ctx.strokeStyle = ringGrad
+      ctx.lineWidth = 4
+      ctx.lineCap = 'round'
+      ctx.stroke()
+
+      // Album art (rounded)
+      if (bgImg) {
+        ctx.save()
+        ctx.beginPath()
+        ctx.roundRect(artX, artY, artSize, artSize, 20)
+        ctx.clip()
+        ctx.drawImage(bgImg, artX, artY, artSize, artSize)
+        ctx.restore()
+      }
+
+      // Track info
+      const font = '-apple-system, SF Pro Display, sans-serif'
+      const infoX = fmt.id === 'wide' ? artX + artSize + 60 : W / 2
+      const infoAlign = fmt.id === 'wide' ? 'left' : 'center'
+      const titleY = isStory ? artY + artSize + 50 : (isSquare ? artY + artSize + 40 : artY + 20)
+      const maxTextW = fmt.id === 'wide' ? W - artX - artSize - 120 : W - 120
+
+      ctx.textAlign = infoAlign
       ctx.fillStyle = 'white'
-      ctx.font = 'bold 56px -apple-system, SF Pro Display, sans-serif'
-      const words = lyricText.split(' '), lines = []
-      let line = ''
-      for (const word of words) {
-        const test = line ? `${line} ${word}` : word
-        if (ctx.measureText(test).width > 860) { lines.push(line); line = word } else { line = test }
+      ctx.font = `bold ${isStory ? 38 : 32}px ${font}`
+      ctx.fillText(track.name, infoX, titleY, maxTextW)
+
+      ctx.fillStyle = 'rgba(255,255,255,0.55)'
+      ctx.font = `${isStory ? 26 : 22}px ${font}`
+      ctx.fillText(track.artists?.map(a => a.name).join(', ') || '', infoX, titleY + (isStory ? 42 : 36), maxTextW)
+
+      // Lyrics (if enabled and available)
+      if (exportWithLyrics && hasLyric) {
+        const lyricText = lyrics[currentLine].text
+        const lyricY = isStory ? titleY + 100 : (isSquare ? titleY + 80 : titleY + 80)
+        ctx.fillStyle = 'white'
+        ctx.font = `bold ${isStory ? 48 : 36}px ${font}`
+        ctx.textAlign = infoAlign
+
+        // Word wrap
+        const words = lyricText.split(' ')
+        const lyricLines = []
+        let line = ''
+        for (const word of words) {
+          const test = line ? `${line} ${word}` : word
+          if (ctx.measureText(test).width > maxTextW) { lyricLines.push(line); line = word } else { line = test }
+        }
+        if (line) lyricLines.push(line)
+        const lh = isStory ? 62 : 48
+        lyricLines.forEach((l, i) => { ctx.fillText(l, infoX, lyricY + i * lh, maxTextW + 40) })
+
+        // Context lyrics (prev/next) - dimmed
+        ctx.font = `${isStory ? 24 : 20}px ${font}`
+        if (currentLine > 0 && lyrics[currentLine - 1]?.text) {
+          ctx.fillStyle = 'rgba(255,255,255,0.2)'
+          ctx.fillText(lyrics[currentLine - 1].text, infoX, lyricY - (isStory ? 40 : 32), maxTextW)
+        }
+        if (currentLine < lyrics.length - 1 && lyrics[currentLine + 1]?.text) {
+          ctx.fillStyle = 'rgba(255,255,255,0.2)'
+          ctx.fillText(lyrics[currentLine + 1].text, infoX, lyricY + lyricLines.length * lh + (isStory ? 20 : 16), maxTextW)
+        }
       }
-      if (line) lines.push(line)
-      const lh = 72, startY = 1050 + ((4 - lines.length) * lh / 2)
-      lines.forEach((l, i) => { ctx.fillText(l, 540, startY + i * lh, 960) })
-      ctx.font = '28px -apple-system, SF Pro Display, sans-serif'
-      if (currentLine > 0 && lyrics[currentLine - 1]?.text) {
-        ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.fillText(lyrics[currentLine - 1].text, 540, startY - 60, 900)
-      }
-      if (currentLine < lyrics.length - 1 && lyrics[currentLine + 1]?.text) {
-        ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.fillText(lyrics[currentLine + 1].text, 540, startY + lines.length * lh + 30, 900)
-      }
-      ctx.fillStyle = 'rgba(255,255,255,0.3)'; ctx.font = 'bold 24px -apple-system, SF Pro Display, sans-serif'
-      ctx.fillText('LyricFlow', 540, 1780)
+
+      // Innovative: Timestamp + Song progress text
+      const timeStr = formatTime(progressMs) + ' / ' + formatTime(durationMs)
+      ctx.textAlign = 'center'
+      ctx.fillStyle = 'rgba(255,255,255,0.25)'
+      ctx.font = `500 ${isStory ? 20 : 16}px ${font}`
+      ctx.fillText(timeStr, W / 2, waveY + waveH / 2 + (isStory ? 30 : 24))
+
+      // Branding
+      ctx.fillStyle = 'rgba(255,255,255,0.2)'
+      ctx.font = `bold ${isStory ? 22 : 18}px ${font}`
+      ctx.fillText('LyricFlow', W / 2, H - (isStory ? 50 : 36))
+
+      // Innovative: Small Spotify code / scan indicator
+      const scanY = H - (isStory ? 90 : 64)
+      ctx.fillStyle = 'rgba(255,255,255,0.12)'
+      ctx.font = `500 ${isStory ? 14 : 12}px ${font}`
+      ctx.fillText(`${track.name} - ${track.artists?.[0]?.name || ''}`, W / 2, scanY, W - 80)
+
       const link = document.createElement('a')
-      link.download = `${track.name} - LyricFlow.png`
-      link.href = canvas.toDataURL('image/png'); link.click()
-      setExportStatus('done'); setTimeout(() => setExportStatus(null), 2000)
+      link.download = `${track.name} - LyricFlow ${fmt.label}.png`
+      link.href = canvas.toDataURL('image/png')
+      link.click()
+      setExportStatus('done')
+      setTimeout(() => setExportStatus(null), 2000)
     } catch { setExportStatus('error'); setTimeout(() => setExportStatus(null), 2000) }
-  }, [track, currentLine, lyrics])
+  }, [track, currentLine, lyrics, accentColor, exportFormat, exportWithLyrics, progressMs, durationMs])
 
   const shareLyricCard = useCallback(async () => {
     if (!track || currentLine < 0 || !lyrics[currentLine]) return
@@ -316,14 +484,13 @@ export default function Player({ onLogout }) {
   }, [])
 
   const fetchCurrentTrack = useCallback(async () => {
-    if (isSeeking) return // Don't overwrite during seek
+    if (isSeeking) return
     try {
       const data = await getCurrentlyPlaying()
       if (!data || !data.item) {
         setStatus('no-track'); setTrack(null); currentTrackIdRef.current = null; return
       }
       setIsPlaying(data.is_playing)
-      // Correct local progress from server (authoritative)
       progressRef.current = data.progress_ms
       lastUpdateRef.current = Date.now()
       setProgressMs(data.progress_ms)
@@ -356,7 +523,7 @@ export default function Player({ onLogout }) {
     return () => clearInterval(id)
   }, [fetchCurrentTrack])
 
-  // rAF progress — only update line index at ~60fps, but throttle setProgressMs to ~30fps for perf
+  // rAF progress
   useEffect(() => {
     if (!isPlaying) {
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
@@ -369,7 +536,6 @@ export default function Player({ onLogout }) {
       lastUpdateRef.current = now
       progressRef.current = Math.min(progressRef.current + elapsed, durationMs || Infinity)
       frameCount++
-      // Update React state every 2nd frame (~30fps) to reduce re-renders
       if (frameCount % 2 === 0) {
         setProgressMs(progressRef.current)
       }
@@ -386,19 +552,18 @@ export default function Player({ onLogout }) {
     if (idx !== currentLine) setCurrentLine(idx)
   }, [progressMs, lyrics, currentLine])
 
-  // Scroll active line to center — using manual scrollTo for precise centering
+  // Scroll active line to center — precise centering with scrollTo
   useEffect(() => {
-    if (currentLine < 0) return
+    if (currentLine < 0 || viewMode !== 'flow') return
     const el = lineRefs.current[currentLine]
     const stage = lyricsStageRef.current
     if (!el || !stage) return
-    const elRect = el.getBoundingClientRect()
-    const stageRect = stage.getBoundingClientRect()
-    const elCenter = elRect.top + elRect.height / 2
-    const stageCenter = stageRect.top + stageRect.height / 2
-    const scrollDelta = elCenter - stageCenter
-    stage.scrollBy({ top: scrollDelta, behavior: 'smooth' })
-  }, [currentLine])
+    const stageH = stage.clientHeight
+    const elTop = el.offsetTop
+    const elH = el.offsetHeight
+    const targetScroll = elTop - stageH / 2 + elH / 2
+    stage.scrollTo({ top: targetScroll, behavior: 'smooth' })
+  }, [currentLine, viewMode])
 
   const albumArt = track?.album?.images?.[0]?.url
   const progress = durationMs ? Math.min((progressMs / durationMs) * 100, 100) : 0
@@ -414,7 +579,7 @@ export default function Player({ onLogout }) {
 
   return (
     <div
-      className={`player${focusMode ? ' focus' : ''}${isPro && proSettings.blurEnabled ? ' pro-mode' : ''}`}
+      className={`player${focusMode ? ' focus' : ''}${isPro && proSettings.blurEnabled ? ' pro-mode' : ''} view-${viewMode}`}
       data-theme={theme}
       style={{ '--accent': accentColor, '--font-scale': fontScale }}
       onClick={() => setFocusMode(v => !v)}
@@ -457,7 +622,7 @@ export default function Player({ onLogout }) {
           )}
 
           {isPro && (
-            <button className="icon-btn" onClick={(e) => { e.stopPropagation(); setShowExport(v => !v); setShowTranslate(false); setShowSettings(false) }} title="Export lyric card">
+            <button className="icon-btn" onClick={(e) => { e.stopPropagation(); setShowExport(v => !v); setShowTranslate(false); setShowSettings(false) }} title="Share">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
               </svg>
@@ -471,6 +636,16 @@ export default function Player({ onLogout }) {
               </svg>
             </button>
           )}
+
+          <button className="icon-btn" onClick={cycleViewMode} title={`View: ${viewMode}`}>
+            {viewMode === 'flow' ? (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="6" y1="12" x2="18" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
+            ) : viewMode === 'karaoke' ? (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 18.5a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13Z"/><path d="M12 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z"/></svg>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 14l3-3 2 2 4-4"/></svg>
+            )}
+          </button>
 
           <button className="icon-btn" onClick={cycleTheme} title="Change theme">
             {theme === 'dark' ? '◐' : theme === 'neon' ? '✦' : theme === 'glass' ? '◈' : '○'}
@@ -509,17 +684,68 @@ export default function Player({ onLogout }) {
         </div>
       )}
 
-      {/* Export dropdown */}
+      {/* Share/Export Modal */}
       {showExport && (
-        <div className="export-dropdown" onClick={e => e.stopPropagation()}>
-          <button className="export-option" onClick={() => { exportLyricCard(); setShowExport(false) }}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
-            Download Lyric Card
-          </button>
-          <button className="export-option" onClick={() => { shareLyricCard(); setShowExport(false) }}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
-            Share Lyric Text
-          </button>
+        <div className="share-overlay" onClick={() => setShowExport(false)}>
+          <div className="share-modal" onClick={e => e.stopPropagation()}>
+            <button className="modal-close" onClick={() => setShowExport(false)}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+
+            <h3 className="share-title">Share This Moment</h3>
+            <p className="share-subtitle">Create a beautiful card to share</p>
+
+            {/* Format picker */}
+            <div className="format-picker">
+              {EXPORT_FORMATS.map(fmt => (
+                <button
+                  key={fmt.id}
+                  className={`format-btn${exportFormat === fmt.id ? ' active' : ''}`}
+                  onClick={() => setExportFormat(fmt.id)}
+                >
+                  <div className={`format-preview fmt-${fmt.id}`} />
+                  <span className="format-label">{fmt.label}</span>
+                  <span className="format-ratio">{fmt.ratio}</span>
+                </button>
+              ))}
+            </div>
+
+            {/* Lyrics toggle */}
+            <div className="share-option-row">
+              <span>Include lyrics</span>
+              <button className={`setting-toggle${exportWithLyrics ? ' on' : ''}`} onClick={() => setExportWithLyrics(v => !v)}>
+                <div className="toggle-knob" />
+              </button>
+            </div>
+
+            {/* Features info */}
+            <div className="share-features">
+              <div className="share-feature-tag">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+                Sound wave visualization
+              </div>
+              <div className="share-feature-tag">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10"/></svg>
+                Progress ring
+              </div>
+              <div className="share-feature-tag">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
+                Album colors
+              </div>
+            </div>
+
+            {/* Action buttons */}
+            <div className="share-actions">
+              <button className="btn-primary share-download" onClick={() => { exportLyricCard() }}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Download Card
+              </button>
+              <button className="btn-secondary share-text" onClick={() => { shareLyricCard(); setShowExport(false) }}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+                Share Text
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -570,40 +796,111 @@ export default function Player({ onLogout }) {
         </div>
       )}
 
-      <div className="lyrics-stage" ref={lyricsStageRef} onClick={e => e.stopPropagation()}>
-        {status === 'loading' && (
-          <div className="lstate">
-            <div className="loading-logo"><div className="logo-icon pulse">
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M6 9Q12 6 18 8M5 13Q12 10 19 12M7 17Q12 14 17 16" stroke="white" strokeWidth="2" strokeLinecap="round"/></svg>
-            </div></div>
-            <p>Finding lyrics...</p>
-          </div>
-        )}
-        {status === 'no-track' && (
-          <div className="lstate">
-            <div className="empty-state-icon">
-              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"><path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" /></svg>
+      {/* FLOW view mode - scrolling lyrics */}
+      {viewMode === 'flow' && (
+        <div className="lyrics-stage" ref={lyricsStageRef} onClick={e => e.stopPropagation()}>
+          {status === 'loading' && (
+            <div className="lstate">
+              <div className="loading-logo"><div className="logo-icon pulse">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M6 9Q12 6 18 8M5 13Q12 10 19 12M7 17Q12 14 17 16" stroke="white" strokeWidth="2" strokeLinecap="round"/></svg>
+              </div></div>
+              <p>Finding lyrics...</p>
             </div>
-            <p>Nothing playing</p>
-            <p className="sub">Play something on Spotify to see lyrics</p>
-          </div>
-        )}
-        {status === 'no-lyrics' && (
-          <div className="lstate"><p>No lyrics available</p><p className="sub">{track?.name} — {track?.artists?.[0]?.name}</p></div>
-        )}
-        {status === 'playing' && (
-          <div className={`lyrics-list${isLeft ? ' align-left' : ''}`}>
-            {displayLyrics.map((line, i) => (
-              <div key={`${track?.id}-${i}`} ref={el => { lineRefs.current[i] = el }} className={lineClass(i, currentLine, isPro, proSettings.blurEnabled)}>
-                <span className="lyric-text">{line.text || <span className="dot">·</span>}</span>
-                {line.translation && <span className="lyric-translation">{line.translation}</span>}
+          )}
+          {status === 'no-track' && (
+            <div className="lstate">
+              <div className="empty-state-icon">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"><path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" /></svg>
               </div>
-            ))}
-          </div>
-        )}
-      </div>
+              <p>Nothing playing</p>
+              <p className="sub">Play something on Spotify to see lyrics</p>
+            </div>
+          )}
+          {status === 'no-lyrics' && (
+            <div className="lstate"><p>No lyrics available</p><p className="sub">{track?.name} — {track?.artists?.[0]?.name}</p></div>
+          )}
+          {status === 'playing' && (
+            <div className={`lyrics-list${isLeft ? ' align-left' : ''}`}>
+              {displayLyrics.map((line, i) => (
+                <div key={`${track?.id}-${i}`} ref={el => { lineRefs.current[i] = el }} className={lineClass(i, currentLine, isPro, proSettings.blurEnabled)}>
+                  <span className="lyric-text">{line.text || <span className="dot">·</span>}</span>
+                  {line.translation && <span className="lyric-translation">{line.translation}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
-      <div className="prog-section" onClick={e => e.stopPropagation()}>
+      {/* KARAOKE view mode - single active line centered */}
+      {viewMode === 'karaoke' && (
+        <div className="lyrics-stage karaoke-stage" onClick={e => e.stopPropagation()}>
+          {(status === 'loading' || status === 'no-track' || status === 'no-lyrics') ? (
+            <div className="lstate">
+              {status === 'loading' && <><div className="loading-logo"><div className="logo-icon pulse"><svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M6 9Q12 6 18 8M5 13Q12 10 19 12M7 17Q12 14 17 16" stroke="white" strokeWidth="2" strokeLinecap="round"/></svg></div></div><p>Finding lyrics...</p></>}
+              {status === 'no-track' && <><div className="empty-state-icon"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"><path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" /></svg></div><p>Nothing playing</p></>}
+              {status === 'no-lyrics' && <><p>No lyrics available</p></>}
+            </div>
+          ) : (
+            <div className="karaoke-center">
+              {currentLine > 0 && displayLyrics[currentLine - 1]?.text && (
+                <div className="karaoke-prev">{displayLyrics[currentLine - 1].text}</div>
+              )}
+              <div className="karaoke-active" key={currentLine}>
+                {currentLine >= 0 && displayLyrics[currentLine]?.text
+                  ? displayLyrics[currentLine].text
+                  : '♪'
+                }
+              </div>
+              {currentLine >= 0 && currentLine < displayLyrics.length - 1 && displayLyrics[currentLine + 1]?.text && (
+                <div className="karaoke-next">{displayLyrics[currentLine + 1].text}</div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* IMMERSIVE view mode - big album art + lyric */}
+      {viewMode === 'immersive' && (
+        <div className="lyrics-stage immersive-stage" onClick={e => e.stopPropagation()}>
+          <div className="immersive-content">
+            {albumArt && <img src={albumArt} className="immersive-art" alt="" />}
+            <div className="immersive-meta">
+              <span className="immersive-title">{track?.name || ''}</span>
+              <span className="immersive-artist">{track?.artists?.map(a => a.name).join(', ') || ''}</span>
+            </div>
+            {status === 'playing' && currentLine >= 0 && displayLyrics[currentLine] && (
+              <div className="immersive-lyric" key={currentLine}>
+                {displayLyrics[currentLine].text}
+              </div>
+            )}
+            {status === 'playing' && (currentLine < 0 || !displayLyrics[currentLine]?.text) && (
+              <div className="immersive-lyric dim">♪</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Controls + Progress */}
+      <div className="controls-section" onClick={e => e.stopPropagation()}>
+        {/* Playback controls */}
+        <div className="playback-controls">
+          <button className="ctrl-btn" onClick={handleSkipPrev} title="Previous">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="white"><path d="M6 6h2v12H6V6zm3.5 6 8.5 6V6l-8.5 6z"/></svg>
+          </button>
+          <button className="ctrl-btn ctrl-play" onClick={handlePlayPause} title={isPlaying ? 'Pause' : 'Play'}>
+            {isPlaying ? (
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="white"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+            ) : (
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="white"><path d="M8 5v14l11-7L8 5z"/></svg>
+            )}
+          </button>
+          <button className="ctrl-btn" onClick={handleSkipNext} title="Next">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="white"><path d="M16 18h2V6h-2v12zM6 18l8.5-6L6 6v12z"/></svg>
+          </button>
+        </div>
+
+        {/* Progress bar */}
         <div className="prog-bar prog-bar-seek" onClick={handleSeek}>
           <div className="prog-fill" style={{ width: `${progress}%` }} />
           <div className="prog-thumb" style={{ left: `${progress}%` }} />
@@ -636,11 +933,11 @@ export default function Player({ onLogout }) {
               </div>
               <div className="showcase-item">
                 <div className="showcase-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></div>
-                <div><strong>Lyric Card Export</strong><p>Stunning lyric cards with album art for social media</p></div>
+                <div><strong>Share Cards</strong><p>Stunning cards with waveform viz, progress ring, and album colors</p></div>
               </div>
               <div className="showcase-item">
                 <div className="showcase-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4m0 14v4m-8.66-15 3.46 2m10.4 6 3.46 2M1 12h4m14 0h4m-15.66 8.66 2-3.46m6-10.4 2-3.46M4.34 4.34l3.46 2m8.4 8.4 3.46 2"/></svg></div>
-                <div><strong>Full Customization</strong><p>Font size, alignment, blur toggle — make it yours</p></div>
+                <div><strong>Full Customization</strong><p>Font size, alignment, blur toggle, view modes — make it yours</p></div>
               </div>
             </div>
 
