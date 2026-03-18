@@ -19,13 +19,17 @@ export function parseLRC(lrc) {
 export function getCurrentLineIndex(lines, progressMs) {
   if (!lines.length) return -1
   const currentTime = progressMs / 1000
-  let index = 0
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].time <= currentTime) {
-      index = i
+  // Before first lyric line
+  if (currentTime < lines[0].time) return -1
+  // Binary search for performance
+  let lo = 0, hi = lines.length - 1
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (lines[mid].time <= currentTime) {
+      lo = mid + 1
     } else {
-      break
+      hi = mid - 1
     }
   }
-  return index
+  return hi
 }

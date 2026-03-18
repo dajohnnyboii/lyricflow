@@ -1,5 +1,5 @@
 const REDIRECT_URI = window.location.origin
-const SCOPES = ['user-read-currently-playing', 'user-read-playback-state']
+const SCOPES = ['user-read-currently-playing', 'user-read-playback-state', 'user-modify-playback-state']
 const SPOTIFY_CLIENT_ID = 'f7f4d50c955942d4951900ffddbf0a3f'
 
 function getClientId() {
@@ -111,6 +111,15 @@ export async function getCurrentlyPlaying() {
   if (response.status === 204 || response.status === 404) return null
   if (!response.ok) return null
   return response.json()
+}
+
+export async function seekToPosition(positionMs) {
+  const token = await getAccessToken()
+  if (!token) return
+  await fetch(`https://api.spotify.com/v1/me/player/seek?position_ms=${Math.round(positionMs)}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}` },
+  })
 }
 
 export function logout() {
