@@ -1,4 +1,4 @@
-const REDIRECT_URI = window.location.origin
+const REDIRECT_URI = 'https://lyricflow-gamma.vercel.app'
 const SCOPES = ['user-read-currently-playing', 'user-read-playback-state', 'user-modify-playback-state']
 const SPOTIFY_CLIENT_ID = 'f7f4d50c955942d4951900ffddbf0a3f'
 

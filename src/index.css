@@ -1154,6 +1154,124 @@ a { color: inherit; text-decoration: none; }
 }
 
 /* ═══════════════════════════════════════════
+   VINYL RECORD VIEW
+   ═══════════════════════════════════════════ */
+
+.vinyl-container {
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; height: 100%;
+  gap: 28px; padding: 40px; text-align: center;
+}
+
+.vinyl-wrapper {
+  position: relative;
+  width: clamp(240px, 55vw, 340px);
+  height: clamp(240px, 55vw, 340px);
+}
+
+.vinyl-disc {
+  position: absolute; inset: -20px;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    #1a1a1a 0deg, #2a2a2a 30deg, #1a1a1a 60deg,
+    #222 90deg, #1a1a1a 120deg, #2a2a2a 150deg,
+    #1a1a1a 180deg, #222 210deg, #1a1a1a 240deg,
+    #2a2a2a 270deg, #1a1a1a 300deg, #222 330deg,
+    #1a1a1a 360deg
+  );
+  box-shadow:
+    0 0 0 3px rgba(255,255,255,0.04),
+    0 0 0 6px rgba(0,0,0,0.8),
+    0 20px 60px rgba(0,0,0,0.6);
+  animation: vinyl-spin 3s linear infinite;
+}
+
+.vinyl-disc.paused {
+  animation-play-state: paused;
+}
+
+.vinyl-disc::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: repeating-radial-gradient(
+    circle at center,
+    transparent 0px, transparent 3px,
+    rgba(255,255,255,0.02) 3px, rgba(255,255,255,0.02) 4px
+  );
+}
+
+.vinyl-disc::after {
+  content: '';
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 16px; height: 16px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: #333;
+  box-shadow: 0 0 0 3px rgba(255,255,255,0.08);
+}
+
+@keyframes vinyl-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.vinyl-cover {
+  position: relative; z-index: 2;
+  width: 100%; height: 100%;
+  border-radius: 50%;
+  object-fit: cover;
+  box-shadow:
+    0 0 0 4px rgba(255,255,255,0.06),
+    0 8px 32px rgba(0,0,0,0.5);
+}
+
+.vinyl-cover-placeholder {
+  position: relative; z-index: 2;
+  width: 100%; height: 100%;
+  border-radius: 50%;
+  background: linear-gradient(135deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
+  border: 1px solid rgba(255,255,255,0.06);
+  display: flex; align-items: center; justify-content: center;
+}
+
+.vinyl-info {
+  display: flex; flex-direction: column; gap: 4px;
+}
+.vinyl-title {
+  font-size: clamp(18px, 4vw, 26px);
+  font-weight: 700; letter-spacing: -0.5px;
+}
+.vinyl-artist {
+  font-size: clamp(13px, 2.5vw, 16px);
+  color: rgba(255,255,255,0.45);
+}
+.vinyl-status {
+  font-size: 13px; color: rgba(255,255,255,0.2);
+  margin-top: 4px;
+}
+
+/* ── Controls frosted glass ── */
+.controls-section {
+  background: rgba(0,0,0,0.4);
+  backdrop-filter: blur(40px) saturate(1.8);
+  border-top: 1px solid rgba(255,255,255,0.06);
+  margin: 0;
+  padding: 16px 20px 24px;
+  border-radius: 20px 20px 0 0;
+}
+
+/* Electron drag area */
+.electron-drag {
+  -webkit-app-region: drag;
+  position: fixed; top: 0; left: 0; right: 0;
+  height: 28px; z-index: 1000;
+}
+
+/* ═══════════════════════════════════════════
    RESPONSIVE
    ═══════════════════════════════════════════ */
 

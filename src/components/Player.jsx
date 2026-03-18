@@ -586,6 +586,7 @@ export default function Player({ onLogout }) {
       onTouchStart={handleTouchStart}
       onTouchEnd={handleTouchEnd}
     >
+      {window.electronAPI?.isElectron && <div className="electron-drag" />}
       {albumArt && <div className="bg-art" key={track?.id} style={{ backgroundImage: `url(${albumArt})` }} />}
       <div className="ambient-orb" />
       <div className="ambient-orb" />
@@ -808,16 +809,36 @@ export default function Player({ onLogout }) {
             </div>
           )}
           {status === 'no-track' && (
-            <div className="lstate">
-              <div className="empty-state-icon">
-                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"><path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" /></svg>
+            <div className="vinyl-container">
+              <div className="vinyl-wrapper">
+                <div className="vinyl-disc paused" />
+                <div className="vinyl-cover-placeholder">
+                  <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="1.2" strokeLinecap="round"><path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" /></svg>
+                </div>
               </div>
-              <p>Nothing playing</p>
-              <p className="sub">Play something on Spotify to see lyrics</p>
+              <div className="vinyl-info">
+                <span className="vinyl-title">Nothing Playing</span>
+                <span className="vinyl-artist">Play something on Spotify</span>
+              </div>
             </div>
           )}
           {status === 'no-lyrics' && (
-            <div className="lstate"><p>No lyrics available</p><p className="sub">{track?.name} — {track?.artists?.[0]?.name}</p></div>
+            <div className="vinyl-container">
+              <div className="vinyl-wrapper">
+                <div className={`vinyl-disc${!isPlaying ? ' paused' : ''}`} />
+                {albumArt
+                  ? <img src={albumArt} className="vinyl-cover" alt="" />
+                  : <div className="vinyl-cover-placeholder">
+                      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="1.2" strokeLinecap="round"><path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" /></svg>
+                    </div>
+                }
+              </div>
+              <div className="vinyl-info">
+                <span className="vinyl-title">{track?.name || ''}</span>
+                <span className="vinyl-artist">{track?.artists?.map(a => a.name).join(', ') || ''}</span>
+                <span className="vinyl-status">No lyrics available</span>
+              </div>
+            </div>
           )}
           {status === 'playing' && (
             <div className={`lyrics-list${isLeft ? ' align-left' : ''}`}>
@@ -838,8 +859,33 @@ export default function Player({ onLogout }) {
           {(status === 'loading' || status === 'no-track' || status === 'no-lyrics') ? (
             <div className="lstate">
               {status === 'loading' && <><div className="loading-logo"><div className="logo-icon pulse"><svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M6 9Q12 6 18 8M5 13Q12 10 19 12M7 17Q12 14 17 16" stroke="white" strokeWidth="2" strokeLinecap="round"/></svg></div></div><p>Finding lyrics...</p></>}
-              {status === 'no-track' && <><div className="empty-state-icon"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"><path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" /></svg></div><p>Nothing playing</p></>}
-              {status === 'no-lyrics' && <><p>No lyrics available</p></>}
+              {status === 'no-track' && (
+                <div className="vinyl-container">
+                  <div className="vinyl-wrapper">
+                    <div className="vinyl-disc paused" />
+                    <div className="vinyl-cover-placeholder">
+                      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="1.2" strokeLinecap="round"><path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" /></svg>
+                    </div>
+                  </div>
+                  <div className="vinyl-info">
+                    <span className="vinyl-title">Nothing Playing</span>
+                    <span className="vinyl-artist">Play something on Spotify</span>
+                  </div>
+                </div>
+              )}
+              {status === 'no-lyrics' && (
+                <div className="vinyl-container">
+                  <div className="vinyl-wrapper">
+                    <div className={`vinyl-disc${!isPlaying ? ' paused' : ''}`} />
+                    {albumArt ? <img src={albumArt} className="vinyl-cover" alt="" /> : <div className="vinyl-cover-placeholder"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="1.2" strokeLinecap="round"><path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" /></svg></div>}
+                  </div>
+                  <div className="vinyl-info">
+                    <span className="vinyl-title">{track?.name || ''}</span>
+                    <span className="vinyl-artist">{track?.artists?.map(a => a.name).join(', ') || ''}</span>
+                    <span className="vinyl-status">No lyrics available</span>
+                  </div>
+                </div>
+              )}
             </div>
           ) : (
             <div className="karaoke-center">

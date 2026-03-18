@@ -32,6 +32,21 @@ export default function App() {
     setLoading(false)
   }, [])
 
+  // Handle Electron OAuth callback
+  useEffect(() => {
+    const handler = (e) => {
+      const { code, error } = e.detail
+      if (error) return
+      if (code) {
+        exchangeCode(code).then(data => {
+          if (data.access_token) setAuthed(true)
+        }).catch(() => {})
+      }
+    }
+    window.addEventListener('oauth-callback', handler)
+    return () => window.removeEventListener('oauth-callback', handler)
+  }, [])
+
   if (loading) {
     return (
       <div className="loading-screen">
